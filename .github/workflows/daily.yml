@@ -13,14 +13,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run ingestion
+      - name: Locate and run ingestion
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-        run: python feed/ingest.py
+        run: |
+          F=$(find . -name ingest.py -path '*feed*' | head -1)
+          echo "Running $F"
+          python "$F"
       - name: Commit snapshots
         run: |
           git config user.name "helm-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add feed/public/*.json
+          git add $(find . -path '*feed/public/*.json')
           git commit -m "feed: $(date -u +%FT%TZ)" || echo "no changes"
