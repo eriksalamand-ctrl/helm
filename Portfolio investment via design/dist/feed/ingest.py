@@ -50,12 +50,67 @@ FRED_SERIES = {
 }
 
 # crypto: coingecko id -> friendly symbol
-CRYPTO = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL", "ripple": "XRP"}
+CRYPTO = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL", "ripple": "XRP",
+          "litecoin": "LTC", "near": "NEAR", "cosmos": "ATOM", "aptos": "APT"}
 
 # index benchmarks (Stooq symbols)
 BENCHMARKS = {"^spx": "SPX", "^ndq": "NDX", "^tsx": "TSX"}
 
 HIST_DAYS = 1280  # ~5y of trading days for the backtest
+
+# ---- broad recommendation universe (mirrors screener.jsx's UNIVERSE) ------
+# Why this exists: without it, Screener/Strategy Lab/Tracker can only score real
+# fundamentals for tickers already in positions.csv — anything else falls back to
+# an honest-but-fake hash proxy, so the model can never recommend something you
+# don't already own. This gives real Finnhub fundamentals + Stooq/Yahoo prices to
+# a genuinely broad, liquid US+CA universe instead of just your ~26 held names.
+# (ticker, exchange) — exchange "US" or "TSX"; ticker has NO ".TO" suffix (the
+# suffix is added by the symbol helpers below, same convention as positions.csv).
+#
+# EQUITIES get real Finnhub fundamentals (P/E, ROE, margins, growth, debt) + news.
+# ETFS get price/history only — P/E-style fundamentals aren't meaningful for a fund,
+# and skipping them keeps the daily job's Finnhub call budget sane.
+UNIVERSE_EQUITIES = [
+    ("AAPL","US"),("MSFT","US"),("NVDA","US"),("AMZN","US"),("GOOGL","US"),("META","US"),("TSLA","US"),("AMD","US"),
+    ("AVGO","US"),("NFLX","US"),("JPM","US"),("V","US"),("UNH","US"),("XOM","US"),("CVX","US"),("COST","US"),
+    ("LLY","US"),("HD","US"),("KO","US"),("WMT","US"),("PLTR","US"),("ARM","US"),("COIN","US"),("CRM","US"),
+    ("NOW","US"),("MU","US"),("MRVL","US"),("SNOW","US"),("UBER","US"),("SHOP","US"),("ANET","US"),("VST","US"),
+    ("CEG","US"),("DELL","US"),("TSM","US"),("ASML","US"),("PANW","US"),
+    ("BAC","US"),("WFC","US"),("GS","US"),("MS","US"),("SCHW","US"),("BLK","US"),("AXP","US"),("MA","US"),
+    ("PYPL","US"),("SOFI","US"),("HOOD","US"),("AFRM","US"),
+    ("JNJ","US"),("PFE","US"),("ABBV","US"),("MRK","US"),("ABT","US"),("TMO","US"),("DHR","US"),("ISRG","US"),
+    ("VRTX","US"),("REGN","US"),
+    ("CAT","US"),("DE","US"),("GE","US"),("HON","US"),("RTX","US"),("LMT","US"),("BA","US"),("UPS","US"),("UNP","US"),
+    ("MCD","US"),("SBUX","US"),("NKE","US"),("TGT","US"),("LOW","US"),("PG","US"),("PEP","US"),("DIS","US"),
+    ("BKNG","US"),("ABNB","US"),("DASH","US"),("RIVN","US"),("LCID","US"),("GM","US"),("F","US"),("CELH","US"),
+    ("COP","US"),("SLB","US"),("OXY","US"),
+    ("ORCL","US"),("IBM","US"),("INTC","US"),("QCOM","US"),("TXN","US"),("ADBE","US"),("INTU","US"),("ADI","US"),
+    ("LRCX","US"),("KLAC","US"),("CDNS","US"),("SNPS","US"),("DDOG","US"),("ZS","US"),("CRWD","US"),("NET","US"),
+    ("MDB","US"),("TEAM","US"),("RBLX","US"),("ROKU","US"),("RKLB","US"),("IONQ","US"),("NEE","US"),("FSLR","US"),
+    ("ENPH","US"),("TMUS","US"),("CMCSA","US"),
+    # ---- Canada (TSX) ----
+    ("RY","TSX"),("TD","TSX"),("ENB","TSX"),("CNQ","TSX"),("SHOP","TSX"),("BNS","TSX"),("BMO","TSX"),("CP","TSX"),
+    ("CNR","TSX"),("SU","TSX"),("ATD","TSX"),("BCE","TSX"),("NTR","TSX"),("CSU","TSX"),("FNV","TSX"),
+    ("HPS-A","TSX"),("CLS","TSX"),("WSP","TSX"),
+    ("GIB-A","TSX"),("L","TSX"),("DOL","TSX"),("MG","TSX"),("TRP","TSX"),("PPL","TSX"),("ABX","TSX"),("K","TSX"),
+    ("WCN","TSX"),("TIH","TSX"),("TFII","TSX"),("MFC","TSX"),("SLF","TSX"),("IFC","TSX"),("POW","TSX"),("QSR","TSX"),
+    ("CTC-A","TSX"),("SAP","TSX"),("IMO","TSX"),("OVV","TSX"),("TOU","TSX"),("ARX","TSX"),("NPI","TSX"),
+    ("BEP-UN","TSX"),("BAM","TSX"),("BN","TSX"),("DOO","TSX"),("CCL-B","TSX"),("STN","TSX"),("GFL","TSX"),
+]
+# CA "SHOP" is the same company as US "SHOP" (dual-listed) — one real fundamentals
+# fetch covers both; skip the redundant Finnhub call but still fetch its own CAD price.
+_DUPE_FUNDAMENTALS = {("SHOP", "TSX")}
+
+UNIVERSE_ETFS = [
+    ("SMH","US"),("SOXX","US"),("ARKK","US"),("ARKW","US"),("ARKG","US"),("IBIT","US"),
+    ("SPY","US"),("IVV","US"),("VTI","US"),("QQQ","US"),("VEA","US"),("VTV","US"),("BND","US"),("GLD","US"),
+    ("IWF","US"),("VGT","US"),("VIG","US"),("IJH","US"),("XLK","US"),("IJR","US"),("RSP","US"),("IWM","US"),
+    ("IWD","US"),("TLT","US"),("XLF","US"),("IAU","US"),("VT","US"),("JEPI","US"),("XLV","US"),("SCHD","US"),
+    ("IEF","US"),("LQD","US"),("DIA","US"),("VB","US"),
+    ("VFV","TSX"),("ZSP","TSX"),("XIC","TSX"),("XIU","TSX"),("XEF","TSX"),("ZCN","TSX"),("ZAG","TSX"),("VCN","TSX"),
+    ("ZEA","TSX"),("XUS","TSX"),("HXT","TSX"),("VDY","TSX"),("XEI","TSX"),("XDV","TSX"),("ZLB","TSX"),("ZWB","TSX"),
+    ("ZWC","TSX"),("VGRO","TSX"),("VBAL","TSX"),("XBAL","TSX"),("XEG","TSX"),("ZUB","TSX"),("BTCC","TSX"),("ETHX.B","TSX"),
+]
 
 
 # --------------------------------------------------------------------------
@@ -128,6 +183,11 @@ def yahoo_symbol(ticker, exchange):
     # Yahoo uses '-' for dotted classes (ETHX.B -> ETHX-B) and '.TO' for TSX.
     t = ticker.upper().replace(".", "-")
     return t if exchange == "US" else f"{t}.TO"
+
+
+# Finnhub uses the same '-' for share classes + '.TO' for TSX as Yahoo.
+def finnhub_symbol(ticker, exchange):
+    return yahoo_symbol(ticker, exchange)
 
 
 def yahoo_history(symbol):
@@ -258,7 +318,14 @@ def fred_all():
 
 
 # ---- Finnhub: fundamentals + company news ---------------------------------
-def finnhub_fundamentals(tickers):
+# Both take a list of (output_key, finnhub_symbol) pairs rather than bare tickers —
+# output_key is what the front-end looks up (e.g. bare "ATD" for a held CA position
+# per data.jsx's convention, or "RY.TO" for a universe-only CA name per screener.jsx's
+# convention); finnhub_symbol is what actually resolves on Finnhub (e.g. "ATD.TO").
+# These can differ, which is exactly the bug this rewrite fixes: the old code sent
+# Finnhub the bare ticker for EVERY holding regardless of exchange, so Canadian
+# names likely never resolved and silently fell back to the hash proxy.
+def finnhub_fundamentals(pairs):
     out = {}
     if not FINNHUB_KEY:
         return out
@@ -273,12 +340,12 @@ def finnhub_fundamentals(tickers):
                     pass
         return None
 
-    for t in tickers:
-        j = get_json(f"https://finnhub.io/api/v1/stock/metric?symbol={t}"
+    for key, sym in pairs:
+        j = get_json(f"https://finnhub.io/api/v1/stock/metric?symbol={sym}"
                      f"&metric=all&token={FINNHUB_KEY}")
         m = (j or {}).get("metric", {})
         if m:
-            out[t] = {
+            out[key] = {
                 # valuation + risk (already used)
                 "pe": pick(m, "peTTM", "peAnnual"),
                 "beta": pick(m, "beta"),
@@ -302,17 +369,17 @@ def finnhub_fundamentals(tickers):
     return out
 
 
-def finnhub_news(tickers, per=3):
+def finnhub_news(pairs, per=3):
     out = []
     if not FINNHUB_KEY:
         return out
     frm = (datetime.now(timezone.utc).date().replace(day=1)).isoformat()
     to = datetime.now(timezone.utc).date().isoformat()
-    for t in tickers:
-        j = get_json(f"https://finnhub.io/api/v1/company-news?symbol={t}"
+    for key, sym in pairs:
+        j = get_json(f"https://finnhub.io/api/v1/company-news?symbol={sym}"
                      f"&from={frm}&to={to}&token={FINNHUB_KEY}")
         for a in (j or [])[:per]:
-            out.append({"ticker": t, "headline": a.get("headline"),
+            out.append({"ticker": key, "headline": a.get("headline"),
                         "url": a.get("url"), "source": a.get("source"),
                         "ts": datetime.utcfromtimestamp(a.get("datetime", 0)).isoformat()})
         time.sleep(1.1)
@@ -357,13 +424,16 @@ def main():
     holdings_tickers = sorted({p["ticker"] for p in positions})
     print(f"  {len(positions)} positions, {len(holdings_tickers)} unique tickers")
 
-    # ---- prices + quotes (Stooq) for holdings + benchmarks ----
     prices, quotes = {}, {}
-    seen = {}
+    seen = set()  # output keys already fetched (held positions take priority)
+
+    # ---- prices + quotes (Yahoo/Stooq) for held positions ----
+    exch_of = {}  # ticker -> "US"/"TSX", for the Finnhub symbol pass below
     for p in positions:
         if p["ticker"] in seen:
             continue
-        seen[p["ticker"]] = True
+        seen.add(p["ticker"])
+        exch_of[p["ticker"]] = p["exchange"]
         hist = history(p["ticker"], p["exchange"])
         if hist:
             prices[p["ticker"]] = hist
@@ -372,6 +442,27 @@ def main():
                                    "chgPct": round((last / prev - 1) * 100, 2) if prev else 0,
                                    "asOf": hist[-1]["d"]}
         time.sleep(0.4)
+
+    # ---- prices + quotes for the broad universe (equities + ETFs) not already held ----
+    # output key mirrors screener.jsx's ticker string: bare for US, "+.TO" for CA.
+    def frontend_key(base, exch):
+        return base if exch == "US" else f"{base}.TO"
+
+    uni_all = UNIVERSE_EQUITIES + UNIVERSE_ETFS
+    new_uni = [(base, exch) for (base, exch) in uni_all if frontend_key(base, exch) not in seen]
+    print(f"  +{len(new_uni)} universe tickers beyond your holdings (of {len(uni_all)} curated)")
+    for base, exch in new_uni:
+        key = frontend_key(base, exch)
+        seen.add(key)
+        hist = history(base, exch)
+        if hist:
+            prices[key] = hist
+            last, prev = hist[-1]["c"], hist[-2]["c"] if len(hist) > 1 else hist[-1]["c"]
+            quotes[key] = {"last": last,
+                           "chgPct": round((last / prev - 1) * 100, 2) if prev else 0,
+                           "asOf": hist[-1]["d"]}
+        time.sleep(0.4)
+
     for sym, name in BENCHMARKS.items():
         yh = {"SPX": "^GSPC", "NDX": "^NDX", "TSX": "^GSPTSE"}.get(name)
         h = (yahoo_history(yh) if yh else None) or stooq_history(sym)
@@ -384,17 +475,32 @@ def main():
     quotes.update(c_quotes)
     prices.update(c_prices)
 
-    # ---- everything else ----
+    # ---- Finnhub fundamentals + news: held positions + universe EQUITIES only ----
+    # (ETFs skipped — P/E-style fundamentals aren't meaningful for a fund; this also
+    # keeps the daily job's Finnhub call budget sane.) Symbol resolution now accounts
+    # for exchange (CA names get ".TO"), which the old code never did.
+    fund_pairs = [(t, finnhub_symbol(t, exch_of.get(t, "US"))) for t in holdings_tickers]
+    uni_equity_new = [(base, exch) for (base, exch) in UNIVERSE_EQUITIES
+                       if frontend_key(base, exch) not in holdings_tickers
+                       and (base, exch) not in _DUPE_FUNDAMENTALS]
+    fund_pairs += [(frontend_key(base, exch), finnhub_symbol(base, exch)) for (base, exch) in uni_equity_new]
+    print(f"  fetching real fundamentals for {len(fund_pairs)} names ({len(holdings_tickers)} held + {len(uni_equity_new)} universe)")
+
     fx = fx_usdcad()
     macro = fred_all()
-    fundamentals = finnhub_fundamentals(holdings_tickers)
-    news = finnhub_news(holdings_tickers) + [
+    fundamentals = finnhub_fundamentals(fund_pairs)
+    # news: held positions only (universe-wide news adds ~3 more minutes of Finnhub
+    # calls for names you don't own yet — lower value than the fundamentals that
+    # actually drive scoring, so scope it to what you hold + geopolitical/macro).
+    held_pairs_for_news = [(t, finnhub_symbol(t, exch_of.get(t, "US"))) for t in holdings_tickers]
+    news = finnhub_news(held_pairs_for_news) + [
         {**a, "ticker": "MACRO"} for a in gdelt()
     ]
 
     meta = {"generatedAt": now_iso(),
             "sources": ["stooq", "coingecko", "bankofcanada", "fred", "finnhub", "gdelt"],
-            "positions": len(positions), "tickers": holdings_tickers}
+            "positions": len(positions), "tickers": holdings_tickers,
+            "universeTickers": len(uni_all), "universeCovered": len(new_uni)}
 
     write("prices.json", prices)
     write("quotes.json", quotes)
