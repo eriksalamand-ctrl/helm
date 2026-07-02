@@ -185,9 +185,22 @@ def yahoo_symbol(ticker, exchange):
     return t if exchange == "US" else f"{t}.TO"
 
 
-# Finnhub uses the same '-' for share classes + '.TO' for TSX as Yahoo.
+# Finnhub uses the same '-' for share classes + '.TO' for TSX as Yahoo (for PRICE/quote
+# endpoints, which do cover TSX). But its FUNDAMENTALS endpoint on the free tier does
+# NOT cover ".TO" symbols — so fundamentals must use the bare/US listing (see below).
 def finnhub_symbol(ticker, exchange):
     return yahoo_symbol(ticker, exchange)
+
+
+# Company fundamentals are listing-agnostic, and Finnhub's FREE tier does not resolve
+# ".TO" tickers — but most large Canadian names are ALSO US-listed under the bare
+# ticker (ENB, RY, TD, BNS, BMO, CNQ, SU, MFC, SLF, NTR...), which DOES return real
+# fundamentals. Canada-only names (CSU, MDA, WSP, HPS-A, GIB-A...) won't resolve on
+# the free tier and correctly fall back to the front-end's honest hash proxy. So for
+# fundamentals + company news we ALWAYS use the bare ticker, never the ".TO" form.
+# (This fixes a regression where adding ".TO" made EVERY Canadian name return nothing.)
+def finnhub_fund_symbol(base):
+    return base.upper()
 
 
 def yahoo_history(symbol):
@@ -256,7 +269,7 @@ def coingecko():
         if h and "prices" in h:
             prices[sym] = [{"d": datetime.utcfromtimestamp(p[0] / 1000).strftime("%Y-%m-%d"),
                             "c": round(p[1], 2)} for p in h["prices"]]
-        time.sleep(1.5)  # be gentle on the free tier
+        time.sleep(6)  # CoinGecko keyless free tier is ~5-10 calls/min — space out or the tail 429s
     return quotes, prices
 
 
@@ -321,10 +334,10 @@ def fred_all():
 # Both take a list of (output_key, finnhub_symbol) pairs rather than bare tickers —
 # output_key is what the front-end looks up (e.g. bare "ATD" for a held CA position
 # per data.jsx's convention, or "RY.TO" for a universe-only CA name per screener.jsx's
-# convention); finnhub_symbol is what actually resolves on Finnhub (e.g. "ATD.TO").
-# These can differ, which is exactly the bug this rewrite fixes: the old code sent
-# Finnhub the bare ticker for EVERY holding regardless of exchange, so Canadian
-# names likely never resolved and silently fell back to the hash proxy.
+# convention); finnhub_symbol is the BARE ticker that resolves on Finnhub's free tier
+# (fundamentals are company-level, and ".TO" is not covered — see finnhub_fund_symbol).
+# The two differ for CA names, which is exactly why they're passed as pairs: we look
+# up "RY.TO" on the front-end but fetch "RY" (its US listing) from Finnhub.
 def finnhub_fundamentals(pairs):
     out = {}
     if not FINNHUB_KEY:
@@ -477,13 +490,14 @@ def main():
 
     # ---- Finnhub fundamentals + news: held positions + universe EQUITIES only ----
     # (ETFs skipped — P/E-style fundamentals aren't meaningful for a fund; this also
-    # keeps the daily job's Finnhub call budget sane.) Symbol resolution now accounts
-    # for exchange (CA names get ".TO"), which the old code never did.
-    fund_pairs = [(t, finnhub_symbol(t, exch_of.get(t, "US"))) for t in holdings_tickers]
+    # keeps the daily job's Finnhub call budget sane.) Fundamentals use the BARE ticker
+    # (finnhub_fund_symbol) — the free tier doesn't cover ".TO", but dual-listed CA
+    # names resolve via their US listing; Canada-only names fall back to the hash proxy.
+    fund_pairs = [(t, finnhub_fund_symbol(t)) for t in holdings_tickers]
     uni_equity_new = [(base, exch) for (base, exch) in UNIVERSE_EQUITIES
                        if frontend_key(base, exch) not in holdings_tickers
                        and (base, exch) not in _DUPE_FUNDAMENTALS]
-    fund_pairs += [(frontend_key(base, exch), finnhub_symbol(base, exch)) for (base, exch) in uni_equity_new]
+    fund_pairs += [(frontend_key(base, exch), finnhub_fund_symbol(base)) for (base, exch) in uni_equity_new]
     print(f"  fetching real fundamentals for {len(fund_pairs)} names ({len(holdings_tickers)} held + {len(uni_equity_new)} universe)")
 
     fx = fx_usdcad()
@@ -492,7 +506,7 @@ def main():
     # news: held positions only (universe-wide news adds ~3 more minutes of Finnhub
     # calls for names you don't own yet — lower value than the fundamentals that
     # actually drive scoring, so scope it to what you hold + geopolitical/macro).
-    held_pairs_for_news = [(t, finnhub_symbol(t, exch_of.get(t, "US"))) for t in holdings_tickers]
+    held_pairs_for_news = [(t, finnhub_fund_symbol(t)) for t in holdings_tickers]
     news = finnhub_news(held_pairs_for_news) + [
         {**a, "ticker": "MACRO"} for a in gdelt()
     ]
