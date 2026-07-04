@@ -263,13 +263,42 @@ def coingecko():
                 quotes[sym] = {"last": q[cid].get("usd"),
                                "chgPct": round(q[cid].get("usd_24h_change", 0), 2),
                                "asOf": now_iso()}
+    # per-coin daily history. The keyless free tier rate-limits the TAIL of a burst even
+    # at modest spacing, so: (1) 9s base spacing, (2) a CoinGecko-specific 429 backoff, and
+    # (3) a SECOND PASS at the end that retries only the coins still missing, with a long
+    # cooldown first. This reliably fills the last few coins (NEAR/ATOM/APT) that used to 429.
+    def fetch_hist(cid):
+        url = (f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart"
+               f"?vs_currency=usd&days=365&interval=daily")
+        for attempt in range(3):
+            raw = get(url)  # get() already retries transient errors; this adds 429-aware waits
+            if raw:
+                try:
+                    j = json.loads(raw)
+                    if j and "prices" in j and j["prices"]:
+                        return [{"d": datetime.utcfromtimestamp(p[0] / 1000).strftime("%Y-%m-%d"),
+                                 "c": round(p[1], 2)} for p in j["prices"]]
+                except Exception:
+                    pass
+            time.sleep(15 * (attempt + 1))  # 15s, 30s — CoinGecko wants a long cooldown after a 429
+        return None
+
     for cid, sym in CRYPTO.items():
-        h = get_json(f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart"
-                     f"?vs_currency=usd&days=365&interval=daily")
-        if h and "prices" in h:
-            prices[sym] = [{"d": datetime.utcfromtimestamp(p[0] / 1000).strftime("%Y-%m-%d"),
-                            "c": round(p[1], 2)} for p in h["prices"]]
-        time.sleep(6)  # CoinGecko keyless free tier is ~5-10 calls/min — space out or the tail 429s
+        h = fetch_hist(cid)
+        if h:
+            prices[sym] = h
+        time.sleep(9)  # base spacing between coins
+
+    # second pass: any coin whose history is still missing gets one more try after a cooldown
+    missing = [(cid, sym) for cid, sym in CRYPTO.items() if sym not in prices]
+    if missing:
+        print(f"  crypto history retry pass for {[s for _, s in missing]}")
+        time.sleep(30)
+        for cid, sym in missing:
+            h = fetch_hist(cid)
+            if h:
+                prices[sym] = h
+            time.sleep(12)
     return quotes, prices
 
 
