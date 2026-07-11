@@ -11,6 +11,14 @@ const cSigned = (n, dp = 0) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleSt
 const COIN_META = {
   "SOLQ":   { coin: "Solana",   sym: "SOL", color: "#9945FF", realized: 2840, h24: -1.8 },
   "ETHX.B": { coin: "Ethereum", sym: "ETH", color: "#627EEA", realized: 1390, h24: -0.9 },
+  "ETHH.B": { coin: "Ethereum", sym: "ETH", color: "#7B8CF0", realized: 0,    h24: -0.9 },
+  "ETHY.B": { coin: "Ether (yield)", sym: "ETHY", color: "#4A5FD0", realized: 0, h24: -0.9 },
+  "ETHA":   { coin: "Ethereum (US)", sym: "ETH", color: "#8E9BF5", realized: 0, h24: -0.9 },
+  "BTCY.B": { coin: "Bitcoin (yield)", sym: "BTCY", color: "#F7931A", realized: 0, h24: 0.4 },
+  "BTCC.B": { coin: "Bitcoin", sym: "BTC", color: "#FFA940", realized: 0, h24: 0.4 },
+  "BTCC":   { coin: "Bitcoin (hgd)", sym: "BTC", color: "#E8820E", realized: 0, h24: 0.4 },
+  "BMNR":   { coin: "Bitmine", sym: "BMNR", color: "#C2410C", realized: 0, h24: 1.2 },
+  "IREN":   { coin: "IREN", sym: "IREN", color: "#0EA5E9", realized: 0, h24: 1.5 },
 };
 
 const CRYPTO_TX = [
@@ -31,7 +39,21 @@ function CryptoView({ accent, onPick }) {
   const [range, setRange] = useStateC("1Y");
   const D = window.PMData;
   const view = D.buildView("crypto");
-  const coins = view.holdings;
+  // aggregate the same crypto ETF held across multiple accounts into one row
+  const _agg = {};
+  view.holdings.forEach((h) => {
+    const k = _agg[h.ticker] || (_agg[h.ticker] = {
+      ticker: h.ticker, name: h.name, sector: h.sector, ccy: h.ccy, price: h.price,
+      dayPct: h.dayPct, divYield: h.divYield, spark: h.spark,
+      shares: 0, marketValue: 0, costBasis: 0, dispValue: 0,
+    });
+    k.shares += h.shares; k.marketValue += h.marketValue; k.costBasis += h.costBasis; k.dispValue += h.dispValue;
+  });
+  const coins = Object.values(_agg).map((h) => {
+    h.plAbs = h.marketValue - h.costBasis;
+    h.plPct = h.costBasis ? (h.plAbs / h.costBasis) * 100 : 0;
+    return h;
+  }).sort((a, b) => b.dispValue - a.dispValue);
   const K = view.kpis;
 
   const realized = coins.reduce((s, h) => s + (COIN_META[h.ticker]?.realized || 0), 0);
@@ -53,7 +75,7 @@ function CryptoView({ accent, onPick }) {
       {/* header */}
       <div className="cv-hero">
         <div>
-          <div className="cv-eyebrow">Crypto ETFs · held in CAD REER · {coins.length} positions</div>
+          <div className="cv-eyebrow">Crypto · digital assets · {coins.length} positions</div>
           <div className="cv-total">{cMoney(K.totalValue)}</div>
           <div className="cv-hero-sub">
             <span className="cv-pill" style={{ background: cSc(h24) + "1a", color: cSc(h24) }}>{cPct(h24, 2)} 24h</span>
@@ -137,14 +159,14 @@ function CryptoView({ accent, onPick }) {
           <section className="pm-card">
             <div className="pm-card-eyebrow">Allocation</div>
             <div className="cv-alloc">
-              <Donut data={coins.map((h) => ({ name: COIN_META[h.ticker]?.sym || h.ticker, pct: (h.dispValue / K.totalValue) * 100 }))}
+              <Donut data={coins.map((h) => ({ name: h.ticker, pct: (h.dispValue / K.totalValue) * 100 }))}
                      colors={coins.map((h) => COIN_META[h.ticker]?.color || accent)}
                      centerLabel={cMoney(K.totalValue)} centerSub="Crypto value" size={150} thickness={20} />
               <ul className="pm-legend">
                 {coins.map((h) => (
                   <li key={h.ticker}>
                     <span className="pm-legend-dot" style={{ background: COIN_META[h.ticker]?.color || accent }} />
-                    <span className="pm-legend-name">{COIN_META[h.ticker]?.coin || h.ticker}</span>
+                    <span className="pm-legend-name">{(COIN_META[h.ticker]?.coin || h.ticker)} <span className="cv-legend-tkr">{h.ticker}</span></span>
                     <span className="pm-legend-pct mono">{((h.dispValue / K.totalValue) * 100).toFixed(0)}%</span>
                   </li>
                 ))}

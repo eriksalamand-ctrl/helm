@@ -150,6 +150,8 @@ function LearningLab({ accent }) {
   const [history, setHistory] = useLLState(loadRunHistory);
   const [expanded, setExpanded] = useLLState(null);
   const [zoom, setZoom] = useLLState(null);
+  const [cfgTick, setCfgTick] = useLLState(0); // bumps to re-render the live-applied banner
+  const [applyFlash, setApplyFlash] = useLLState(null); // transient "applied" confirmation
 
   const modeCfg = { quick: { n: 8, label: "Quick Test" }, medium: { n: 20, label: "Medium" }, full: { n: 40, label: "Full" } }[mode];
 
@@ -211,7 +213,7 @@ function LearningLab({ accent }) {
 
   function run() {
     setStatus("running"); setProgress(0); setResult(null); setLogText(""); setAiState(""); stopRef.current = false;
-    const cfg = window.helmPresetCfg ? window.helmPresetCfg("balanced") : { weights: { trend: 35, value: 20, reversion: 25, income: 20 }, buyBar: 62, sellBar: 40, rsiOver: 72, rsiUnder: 30, stopMult: 1, maxPos: 12 };
+    const cfg = window.helmPresetCfg ? window.helmPresetCfg("balanced", true) : { weights: { trend: 35, value: 20, reversion: 25, income: 20 }, buyBar: 62, sellBar: 40, rsiOver: 72, rsiUnder: 30, stopMult: 1, maxPos: 12, __raw: true };
     // pick tickers: random sample of the selected universe, different each run
     const seen = {}, uniq = [];
     filterUniverse().forEach((h) => { if (!seen[h.ticker]) { seen[h.ticker] = 1; uniq.push(h); } });
@@ -333,6 +335,46 @@ Reason: ${accept.accepted ? "Candidate improved risk-adjusted return without wor
     const next = [v, ...versions].slice(0, 30);
     setVersions(next); saveVersions(next);
   }
+  // Phase 1b: actually APPLY an accepted candidate to the live engine (via engineconfig.js).
+  // v0.1.N = the first N rules of the library stacked; applying writes those rule-ids to the
+  // override store, which signalsFor() reads at call time. Reversible with resetEngine().
+  // Honest feedback: count how many current holdings the applied rules actually change action on.
+  function affectedCount(ids) {
+    try {
+      const D = window.PMData; const cfg = window.helmPresetCfg ? window.helmPresetCfg("balanced", true) : null;
+      if (!cfg || !D) return null;
+      let n = 0, tot = 0;
+      D.allHoldings.forEach((x) => { if (!x.spark) return; tot++;
+        const s0 = { ...window.signalsFor(x, cfg) }; const s1 = { ...s0 };
+        ids.forEach((id) => { const r = window.HelmCandidateRules && window.HelmCandidateRules[id]; if (r) r(s1); });
+        if (s0.action !== s1.action) n++;
+      });
+      return { n, tot };
+    } catch (e) { return null; }
+  }
+  function applyRules(ids, version, label, note) {
+    if (!window.HelmConfig) return;
+    const aff = affectedCount(ids);
+    window.HelmConfig.apply({ rules: ids, meta: { source: "Learning Lab", version, label, note: note || "applied to live engine" } });
+    setCfgTick((t) => t + 1);
+    setApplyFlash({ version, nRules: ids.length,
+      msg: aff ? `${version} live — ${ids.length} rule${ids.length === 1 ? "" : "s"} active, changing ${aff.n} of ${aff.tot} current holdings` : `${version} applied to the live engine` });
+    setTimeout(() => setApplyFlash(null), 6000);
+  }
+  function applyToEngine(res) {
+    const candRuleCount = parseInt((res.candLabel || "v0.1.1").split(".").pop(), 10) || 1;
+    const ids = CANDIDATE_RULES.slice(0, candRuleCount).map((r) => r.id);
+    applyRules(ids, res.candLabel, res.ruleName || "candidate rule", "walk-forward accepted \u2192 applied to live engine");
+    if (!versions.some((v) => v.num === res.candLabel)) promote(res); // register once
+  }
+  // apply straight from a registered version row (no re-run needed)
+  function applyVersion(v) {
+    const cnt = parseInt((v.num || "v0.1.1").split(".").pop(), 10) || 1;
+    const ids = CANDIDATE_RULES.slice(0, cnt).map((r) => r.id);
+    applyRules(ids, v.num, v.change || "candidate rule", "applied from version registry");
+  }
+  function resetEngine() { if (window.HelmConfig) { window.HelmConfig.reset("reverted from Learning Lab"); setCfgTick((t) => t + 1); setApplyFlash({ version: null, msg: "Reverted to baseline v0.1.0 \u2014 the live engine is back to the deployed model" }); setTimeout(() => setApplyFlash(null), 5000); } }
+  const appliedVersion = (window.HelmConfig && window.HelmConfig.get().meta) ? window.HelmConfig.get().meta.version : null;
 
   const KROW = (label, b, c, fmt, better) => {
     const bv = fmt(b), cv = fmt(c);
@@ -502,9 +544,16 @@ Reason: ${accept.accepted ? "Candidate improved risk-adjusted return without wor
           <section className="pm-card">
             <div className="pm-card-head">
               <div className="pm-card-eyebrow">Improvement log{aiState ? <span className="ll-ai-tag"> · {aiState}</span> : null}</div>
-              <button className="ll-promote" style={{ borderColor: accent, color: accent }} onClick={() => promote(result)}>
-                {result.accept.accepted ? "Promote to " + result.candLabel : "Log rejected version"}
-              </button>
+              <div className="ll-loghdr-btns">
+                {result.accept.accepted && window.HelmConfig && (
+                  appliedVersion === result.candLabel
+                    ? <span className="ll-apply-live" style={{ color: accent, borderColor: accent }}>✓ {result.candLabel} is live</span>
+                    : <button className="ll-apply" style={{ borderColor: accent, background: accent }} onClick={() => applyToEngine(result)}>⚡ Apply {result.candLabel} to live engine</button>
+                )}
+                <button className="ll-promote" style={{ borderColor: accent, color: accent }} onClick={() => promote(result)}>
+                  {result.accept.accepted ? "Promote to " + result.candLabel : "Log rejected version"}
+                </button>
+              </div>
             </div>
             <pre className="ll-log">{logText}</pre>
           </section>
@@ -548,19 +597,44 @@ Reason: ${accept.accepted ? "Candidate improved risk-adjusted return without wor
       {/* version registry */}
       <section className="pm-card">
         <div className="pm-card-head"><div className="pm-card-eyebrow">Model version registry</div>{versions.length > 0 && <button className="pm-link" style={{ color: "var(--muted)" }} onClick={() => { setVersions([]); saveVersions([]); }}>Clear</button>}</div>
+        {applyFlash && (
+          <div className="ll-applyflash" style={{ borderColor: accent, background: accent + "12" }}>
+            <span className="ll-applyflash-ico" style={{ background: accent }}>{applyFlash.version ? "\u26a1" : "\u21ba"}</span>
+            <span>{applyFlash.msg}</span>
+          </div>
+        )}
+        {window.HelmConfig && window.HelmConfig.isActive() && (() => {
+          const cfg = window.HelmConfig.get(); const nR = (cfg.rules || []).length;
+          return (
+            <div className="ll-live-applied" data-tick={cfgTick}>
+              <span className="ll-live-dot" />
+              <span className="ll-live-txt">Live engine running an <strong>applied edit</strong> — {cfg.meta && cfg.meta.version ? cfg.meta.version : "custom"} · {nR} rule{nR === 1 ? "" : "s"} active{cfg.meta && cfg.meta.date ? " · since " + cfg.meta.date : ""}. Screener, Tracker, Cockpit &amp; Simulation all run this engine now.</span>
+              <button className="ll-reset" onClick={resetEngine}>Reset to baseline</button>
+            </div>
+          );
+        })()}
         <div className="ll-vrow ll-vbase">
-          <span className="ll-vnum">v0.1.0</span><span className="ll-vstatus" style={{ background: accent + "1a", color: accent }}>● base · live</span>
+          <span className="ll-vnum">v0.1.0</span><span className="ll-vstatus" style={{ background: accent + "1a", color: accent }}>● base</span>
           <span className="ll-vchange">Current production model — signalsFor() as deployed</span>
+          {appliedVersion ? <button className="ll-vapply ll-vreset" onClick={resetEngine}>Revert to this</button>
+            : <span className="ll-vlive" style={{ color: accent }}>● live now</span>}
         </div>
         {versions.length === 0
           ? <div className="ll-empty">No candidate versions yet. Run a walk-forward and promote an accepted candidate to register it here.</div>
-          : versions.map((v, vi) => (
-            <div className="ll-vrow" key={v.num + v.date + vi}>
-              <span className="ll-vnum">{v.num}</span>
-              <span className="ll-vstatus" style={{ background: (v.accepted ? llUP : llDN) + "1a", color: v.accepted ? llUP : llDN }}>● {v.status}</span>
-              <span className="ll-vchange">{v.change} · Sharpe {llNum(v.sharpe)} · {v.date}</span>
-            </div>
-          ))}
+          : versions.map((v, vi) => {
+            const isLive = appliedVersion === v.num;
+            return (
+              <div className="ll-vrow" key={v.num + v.date + vi}>
+                <span className="ll-vnum">{v.num}</span>
+                <span className="ll-vstatus" style={{ background: (v.accepted ? llUP : llDN) + "1a", color: v.accepted ? llUP : llDN }}>● {v.status}</span>
+                <span className="ll-vchange">{v.change} · Sharpe {llNum(v.sharpe)} · {v.date}</span>
+                {isLive ? <span className="ll-vlive" style={{ color: accent }}>● live now</span>
+                  : v.accepted && window.HelmConfig
+                    ? <button className="ll-vapply" style={{ borderColor: accent, color: accent }} onClick={() => applyVersion(v)}>⚡ Apply</button>
+                    : <span className="ll-vapply ll-vna">—</span>}
+              </div>
+            );
+          })}
       </section>
 
       <div className="ll-foot">Research &amp; validation only — no real trades. Walk-forward with purged/embargo split (train on oldest 50%, embargo 28-day feature gap, test on remaining OOS) \u2014 kills look-ahead leakage from overlapping momentum/RSI windows. AI provider: set <span className="mono">window.helmAI</span> to use Opus/Gemini; falls back to Haiku, then a rule-based log.</div>
@@ -692,13 +766,31 @@ const LL_CSS = `
 .ll-gate-ico { font-weight: 700; font-size: 14px; }
 .ll-ai-tag { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
 .ll-promote { font: inherit; font-size: 12px; font-weight: 600; background: none; border: 1px solid; border-radius: 8px; padding: 7px 13px; cursor: pointer; }
+.ll-loghdr-btns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ll-apply { font: inherit; font-size: 12px; font-weight: 700; color: #fff; border: 1px solid; border-radius: 8px; padding: 7px 13px; cursor: pointer; }
+.ll-apply-live { font-size: 12px; font-weight: 700; border: 1px solid; border-radius: 8px; padding: 7px 13px; background: color-mix(in srgb, currentColor 8%, white); }
+.ll-live-applied { display: flex; align-items: center; gap: 11px; background: color-mix(in srgb, #0e9f6e 7%, white); border: 1px solid color-mix(in srgb, #0e9f6e 30%, var(--line)); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; font-size: 12.5px; color: var(--ink-2); }
+.ll-live-txt { flex: 1; line-height: 1.45; } .ll-live-txt strong { color: var(--ink); }
+.ll-live-dot { width: 9px; height: 9px; border-radius: 50%; background: #0e9f6e; flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, #0e9f6e 20%, transparent); }
+.ll-reset { font: inherit; font-size: 11.5px; font-weight: 600; color: var(--ink-2); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 11px; cursor: pointer; flex: none; }
+.ll-reset:hover { border-color: #e02424; color: #e02424; }
 .ll-log { font-family: var(--mono); font-size: 12px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 14px 16px; margin: 0; }
-.ll-vrow { display: grid; grid-template-columns: 70px 110px 1fr; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line-2); font-size: 12.5px; }
+.ll-vrow { display: grid; grid-template-columns: 70px 110px 1fr auto; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line-2); font-size: 12.5px; }
 .ll-vrow:last-child { border-bottom: 0; }
 .ll-vbase { border-bottom: 1px solid var(--line); }
 .ll-vnum { font-family: var(--mono); font-weight: 700; }
 .ll-vstatus { font-size: 10.5px; font-weight: 600; padding: 2px 9px; border-radius: 99px; text-align: center; }
 .ll-vchange { color: var(--ink-2); }
+.ll-vapply { font: inherit; font-size: 11.5px; font-weight: 700; background: var(--panel); border: 1px solid; border-radius: 7px; padding: 5px 12px; cursor: pointer; white-space: nowrap; }
+.ll-vapply:hover { filter: brightness(0.97); }
+.ll-vreset { border-color: var(--line); color: var(--muted); font-weight: 600; }
+.ll-vreset:hover { border-color: #e02424; color: #e02424; }
+.ll-vlive { font-size: 11.5px; font-weight: 700; white-space: nowrap; padding: 5px 4px; }
+.ll-vna { border: 0; color: var(--muted); cursor: default; padding: 5px 12px; }
+.ll-vna:hover { filter: none; }
+.ll-applyflash { display: flex; align-items: center; gap: 11px; border: 1px solid; border-radius: 10px; padding: 11px 14px; margin-bottom: 12px; font-size: 12.5px; font-weight: 600; color: var(--ink); animation: llflash 0.25s ease; }
+.ll-applyflash-ico { width: 22px; height: 22px; border-radius: 50%; color: #fff; display: grid; place-items: center; font-size: 12px; flex: none; }
+@keyframes llflash { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .ll-empty { font-size: 13px; color: var(--muted); padding: 14px 0; }
 .ll-hrun { border-bottom: 1px solid var(--line-2); }
 .ll-hrun:last-child { border-bottom: 0; }
@@ -721,3 +813,6 @@ const LL_CSS = `
 `;
 
 window.LearningLab = LearningLab;
+// Phase 1b: publish the rule library as an id→apply map so signalsFor() can run APPROVED
+// candidate rules against the live engine (engineconfig.js holds which ids are active).
+window.HelmCandidateRules = CANDIDATE_RULES.reduce((m, r) => { m[r.id] = r.apply; return m; }, {});

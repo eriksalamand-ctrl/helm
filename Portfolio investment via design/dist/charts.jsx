@@ -24,14 +24,14 @@ function smoothPath(pts, tension = 0.5) {
 // ----------------------------------------------------------------------------
 // AreaChart — portfolio value over time with optional benchmark overlay + hover
 // ----------------------------------------------------------------------------
-function AreaChart({ data, benchmark, accent, height = 280, showBenchmark = true }) {
+function AreaChart({ data, benchmark, accent, height = 280, showBenchmark = true, dates = null }) {
   const [hover, setHover] = useState(null);
   const wrapRef = useRef(null);
   const W = 1000, H = height, padL = 8, padR = 8, padT = 16, padB = 8;
 
   const { dMin, dMax } = useMemo(() => {
     const lo = Math.min(...data), hi = Math.max(...data);
-    const pad = (hi - lo) * 0.08;
+    const pad = (hi - lo) * 0.08 || 1;
     return { dMin: lo - pad, dMax: hi + pad };
   }, [data]);
 
@@ -41,13 +41,31 @@ function AreaChart({ data, benchmark, accent, height = 280, showBenchmark = true
   const linePath = data.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const areaPath = `${linePath} L${x(data.length - 1).toFixed(1)},${H - padB} L${x(0).toFixed(1)},${H - padB} Z`;
 
-  // benchmark rescaled to share the same vertical band as the portfolio start
+  // benchmark rescaled to the portfolio's start AND to its own point count, so the grey
+  // line always spans the exact same horizontal window as the portfolio line.
   const benchPath = useMemo(() => {
-    if (!benchmark || !showBenchmark) return null;
+    if (!benchmark || !showBenchmark || benchmark.length < 2) return null;
     const b0 = benchmark[0];
-    const scaled = benchmark.map((b) => data[0] * (b / b0));
-    return scaled.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    const xb = (i) => padL + (i / (benchmark.length - 1)) * (W - padL - padR);
+    return benchmark.map((b, i) => `${i === 0 ? "M" : "L"}${xb(i).toFixed(1)},${y(data[0] * (b / b0)).toFixed(1)}`).join(" ");
   }, [benchmark, data, dMin, dMax, showBenchmark]);
+
+  // ---- axes ----
+  const fmtAxis = (v) => Math.abs(v) >= 1e6 ? "$" + (v / 1e6).toFixed(2) + "M" : Math.abs(v) >= 1000 ? "$" + Math.round(v / 1000) + "k" : "$" + Math.round(v);
+  const yTicks = useMemo(() => {
+    const span = dMax - dMin, rawStep = span / 3.5;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => span / s <= 4.5) || 5 * mag;
+    const out = [];
+    for (let v = Math.ceil(dMin / step) * step; v <= dMax; v += step) out.push(v);
+    return out;
+  }, [dMin, dMax]);
+  const fmtDate = (d, span) => d.toLocaleDateString("en-CA", span > 200 ? { month: "short", year: "2-digit" } : { month: "short", day: "numeric" });
+  const xTicks = useMemo(() => {
+    if (!dates || dates.length < 2) return null;
+    const n = dates.length, span = (dates[n - 1] - dates[0]) / 864e5;
+    return [0, 0.25, 0.5, 0.75, 1].map((f) => fmtDate(dates[Math.round(f * (n - 1))], span));
+  }, [dates]);
 
   function onMove(e) {
     const rect = wrapRef.current.getBoundingClientRect();
@@ -58,43 +76,61 @@ function AreaChart({ data, benchmark, accent, height = 280, showBenchmark = true
 
   const gid = "ag-" + accent.replace(/[^a-z0-9]/gi, "");
   return (
-    <div ref={wrapRef} style={{ position: "relative", width: "100%" }}
-         onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
-           style={{ width: "100%", height: H, display: "block" }}>
-        <defs>
-          <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={accent} stopOpacity="0.22" />
-            <stop offset="100%" stopColor={accent} stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <path d={areaPath} fill={`url(#${gid})`} />
-        {benchPath && (
-          <path d={benchPath} fill="none" stroke="currentColor" strokeOpacity="0.28"
-                strokeWidth="1.5" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
-        )}
-        <path d={linePath} fill="none" stroke={accent} strokeWidth="2"
-              vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+    <div style={{ width: "100%" }}>
+      <div ref={wrapRef} style={{ position: "relative", width: "100%" }}
+           onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+             style={{ width: "100%", height: H, display: "block" }}>
+          <defs>
+            <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={accent} stopOpacity="0.22" />
+              <stop offset="100%" stopColor={accent} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          {yTicks.map((v) => (
+            <line key={v} x1={padL} y1={y(v)} x2={W - padR} y2={y(v)}
+                  stroke="currentColor" strokeOpacity="0.07" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+          ))}
+          <path d={areaPath} fill={`url(#${gid})`} />
+          {benchPath && (
+            <path d={benchPath} fill="none" stroke="currentColor" strokeOpacity="0.28"
+                  strokeWidth="1.5" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
+          )}
+          <path d={linePath} fill="none" stroke={accent} strokeWidth="2"
+                vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+          {hover != null && (
+            <line x1={x(hover)} y1={padT} x2={x(hover)} y2={H - padB}
+                  stroke="currentColor" strokeOpacity="0.25" strokeWidth="1"
+                  vectorEffect="non-scaling-stroke" />
+          )}
+          {hover != null && (
+            <circle cx={x(hover)} cy={y(data[hover])} r="3.5" fill={accent}
+                    stroke="#fff" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+          )}
+        </svg>
+        {yTicks.map((v) => (
+          <span key={v} style={{ position: "absolute", left: 4, top: `calc(${(y(v) / H) * 100}% - 15px)`,
+            fontSize: 10, fontFamily: "var(--mono)", color: "var(--muted)", pointerEvents: "none", background: "color-mix(in srgb, var(--panel, #fff) 72%, transparent)", padding: "1px 4px", borderRadius: 4 }}>
+            {fmtAxis(v)}
+          </span>
+        ))}
         {hover != null && (
-          <line x1={x(hover)} y1={padT} x2={x(hover)} y2={H - padB}
-                stroke="currentColor" strokeOpacity="0.25" strokeWidth="1"
-                vectorEffect="non-scaling-stroke" />
-        )}
-        {hover != null && (
-          <circle cx={x(hover)} cy={y(data[hover])} r="3.5" fill={accent}
-                  stroke="#fff" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-        )}
-      </svg>
-      {hover != null && (
-        <div className="pm-chart-tip" style={{
-          position: "absolute", top: 6,
-          left: `clamp(0px, ${(hover / (data.length - 1)) * 100}%, calc(100% - 150px))`,
-        }}>
-          <div className="pm-chart-tip-val">{fmtUSD(data[hover])}</div>
-          <div className="pm-chart-tip-sub">
-            Day {hover + 1} · {((data[hover] / data[0] - 1) * 100 >= 0 ? "+" : "")}
-            {((data[hover] / data[0] - 1) * 100).toFixed(1)}% from start
+          <div className="pm-chart-tip" style={{
+            position: "absolute", top: 6,
+            left: `clamp(0px, ${(hover / (data.length - 1)) * 100}%, calc(100% - 150px))`,
+          }}>
+            <div className="pm-chart-tip-val">{fmtUSD(data[hover])}</div>
+            <div className="pm-chart-tip-sub">
+              {dates && dates[hover] ? dates[hover].toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" }) : `Day ${hover + 1}`} · {((data[hover] / data[0] - 1) * 100 >= 0 ? "+" : "")}
+              {((data[hover] / data[0] - 1) * 100).toFixed(1)}% from start
+            </div>
           </div>
+        )}
+      </div>
+      {xTicks && (
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "5px 2px 0",
+          fontSize: 10, fontFamily: "var(--mono)", color: "var(--muted)", borderTop: "1px solid var(--line-2, #f0f2f5)", marginTop: 2 }}>
+          {xTicks.map((t, i) => <span key={i}>{t}</span>)}
         </div>
       )}
     </div>
@@ -120,7 +156,7 @@ function Sparkline({ points, color, width = 96, height = 28 }) {
 // ----------------------------------------------------------------------------
 // Donut — sector allocation
 // ----------------------------------------------------------------------------
-function Donut({ data, colors, size = 168, thickness = 22, centerLabel, centerSub }) {
+function Donut({ data, colors, size = 168, thickness = 22, centerLabel, centerSub, onSlice }) {
   const r = size / 2 - thickness / 2;
   const c = size / 2;
   const circ = 2 * Math.PI * r;
@@ -133,13 +169,14 @@ function Donut({ data, colors, size = 168, thickness = 22, centerLabel, centerSu
           const frac = d.pct / 100;
           const len = frac * circ;
           const seg = (
-            <circle key={d.name} cx={c} cy={c} r={r} fill="none"
+            <circle key={i} cx={c} cy={c} r={r} fill="none"
                     stroke={colors[i % colors.length]}
                     strokeWidth={hi === i ? thickness + 4 : thickness}
                     strokeDasharray={`${len} ${circ - len}`}
                     strokeDashoffset={-offset}
                     style={{ transition: "stroke-width .15s", cursor: "pointer" }}
-                    onMouseEnter={() => setHi(i)} onMouseLeave={() => setHi(null)} />
+                    onMouseEnter={() => setHi(i)} onMouseLeave={() => setHi(null)}
+                    onClick={onSlice ? () => onSlice(d, i) : undefined} />
           );
           offset += len;
           return seg;

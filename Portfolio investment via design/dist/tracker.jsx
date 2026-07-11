@@ -23,6 +23,17 @@ function tRsi(spark) {
   const ag = g / n, al = l / n; if (al === 0) return 100; return 100 - 100 / (1 + ag / al);
 }
 
+// route a pick you don't currently hold to a plausible account (mirrors Papersim's eligibility
+// rule): direct crypto -> the crypto (non-registered) account only; USD assets -> a USD account;
+// CAD -> a CAD account. Held picks keep routing to wherever they actually sit (p.h.acct).
+function routeForNewPick(h, accounts) {
+  const isDirectCoin = (h.market === "Crypto" || h.sector === "Crypto") && !/\.(TO|B)$/.test(h.ticker || "") && !/Q$|ETF/i.test(h.ticker || "") && (h.ticker || "").length <= 5;
+  const wantCcy = (h.market === "US" || h.market === "US-ETF" || h.market === "Crypto" || h.ccy === "USD") ? "USD" : "CAD";
+  const pool = (isDirectCoin ? accounts.filter((a) => !a.reg) : accounts.filter((a) => a.ccy === wantCcy));
+  const acct = pool[0] || accounts[0];
+  return acct ? acct.id : null;
+}
+
 // the three tracked portfolios = the Strategy Lab's risk-model presets.
 // Each proposes trades from the same universe but with a different posture, sizing and concentration.
 const MODELS = [
@@ -61,13 +72,17 @@ function runModel(model, universe, sp500) {
   const totalConv = picks.reduce((s, p) => s + Math.pow(Math.max(1, p.s - 45), conc), 0) || 1;
   picks.forEach((p) => { p.w = Math.pow(Math.max(1, p.s - 45), conc) / totalConv; });
 
-  // deterministic ~120-trading-day forward path per pick, ending near its realized plPct
+  // deterministic ~120-trading-day forward path per pick, ending near its realized plPct.
+  // Not-currently-held picks (from the broader universe) have no cost basis to realize a
+  // plPct from — assume a modest tilt off the pick's own momentum factor instead of NaN.
   const PH = window.PMData.priceHistory;
   const N = 120;
   const curve = new Array(N).fill(0);
   picks.forEach((p) => {
-    const tot = tClamp((p.h.plPct || 0) / 100, -0.6, 2.0);
-    const path = PH(p.h.seed * 9 + 7, N, Math.max(1, p.h.price), tot, 0.018);
+    const plBasis = typeof p.h.plPct === "number" ? p.h.plPct / 100 : ((p.f.mom - 50) / 50) * 0.35;
+    const tot = tClamp(plBasis, -0.6, 2.0);
+    const seed = typeof p.h.seed === "number" ? p.h.seed : Math.round(tHash(p.h.ticker || "?") * 100000);
+    const path = PH(seed * 9 + 7, N, Math.max(1, p.h.price), tot, 0.018);
     const base = path[0] || 1;
     for (let i = 0; i < N; i++) curve[i] += p.w * (path[i] / base);
   });
@@ -132,10 +147,17 @@ function StrategyTracker({ accent }) {
   const acctLabel = (id) => { const a = (D.accounts || []).find((x) => x.id === id); return a ? a.label : ""; };
 
   const runs = useMemoT(() => {
-    const universe = D.buildView("all").holdings;
+    const held = D.buildView("all").holdings;
     // dedupe by ticker so a name held in 2 accounts isn't double-counted
     const seen = {}; const uni = [];
-    universe.forEach((h) => { if (!seen[h.ticker]) { seen[h.ticker] = 1; uni.push(h); } });
+    held.forEach((h) => { if (!seen[h.ticker]) { seen[h.ticker] = 1; uni.push(h); } });
+    // broaden beyond your book: the 3 models should be able to propose names you don't already
+    // own, not just reshuffle existing holdings (mirrors what Papersim's buy engine already does).
+    (window.HelmUniverse || []).forEach((u) => {
+      if (!u || !u.ticker || seen[u.ticker]) return;
+      seen[u.ticker] = 1;
+      uni.push({ ticker: u.ticker, name: u.name, market: u.market, sector: u.sector, price: u.price, divYield: u.divYield, spark: u.spark, weight: 0, plPct: null });
+    });
     return MODELS.map((m) => runModel(m, uni, D.sp500)).sort((a, b) => b.ret - a.ret);
   }, []);
   const champ = runs[0];
@@ -171,9 +193,9 @@ function StrategyTracker({ accent }) {
       // every model recorded daily — return, value-added, AND its FULL proposed book (entry prices) so
       // the feed can mark each model's book to market later (not just the champion's top 5)
       models: runs.map((r) => ({ id: r.model.id, name: r.model.name, ret: +r.ret.toFixed(1), va: +r.va.toFixed(1),
-        picks: r.picks.map((p) => ({ t: p.h.ticker, entry: p.h.price, w: +(p.w || 0).toFixed(3) })) })),
+        picks: r.picks.map((p) => ({ t: p.h.ticker, entry: p.h.price, w: +(p.w || 0).toFixed(3), c: +(p.s || 0).toFixed(1) })) })),
       topPick: champ.picks[0] ? champ.picks[0].h.ticker : "\u2014",
-      picks: champ.picks.map((p) => ({ t: p.h.ticker, entry: p.h.price, w: +(p.w || 0).toFixed(3) })),
+      picks: champ.picks.map((p) => ({ t: p.h.ticker, entry: p.h.price, w: +(p.w || 0).toFixed(3), c: +(p.s || 0).toFixed(1) })),
     };
   }
   function recordSnapshot(silent) {
@@ -288,7 +310,7 @@ function StrategyTracker({ accent }) {
           const built = window.helmConstruct ? window.helmConstruct(r.picks.map((p) => ({ ticker: p.h.ticker, sector: p.h.sector, score: (p.h.sig ? p.h.sig.composite : 0) || Math.round((p.w || 0.05) * 800), h: p.h })), { maxName: r.model.id === "aggressive" ? 0.18 : r.model.id === "conservative" ? 0.09 : 0.12, maxSector: r.model.id === "aggressive" ? 0.40 : 0.30 }) : null;
           const wmap = {};
           if (built) built.weights.forEach((b) => { wmap[b.ticker] = b.w; });
-          const rows = r.picks.map((p) => { const w = built && wmap[p.h.ticker] != null ? wmap[p.h.ticker] : (p.w || 0); return { t: p.h.ticker, sec: p.h.sector, w: w * 100, amt: w * equity, acct: p.h.acct, px: p.h.price, ccy: p.h.ccy, h0: p.h }; }).sort((a, b) => b.w - a.w);
+          const rows = r.picks.map((p) => { const w = built && wmap[p.h.ticker] != null ? wmap[p.h.ticker] : (p.w || 0); const acct = p.h.acct || routeForNewPick(p.h, D.accounts || []); return { t: p.h.ticker, sec: p.h.sector, w: w * 100, amt: w * equity, acct, px: p.h.price, ccy: p.h.ccy, h0: p.h, isNew: !p.h.acct }; }).sort((a, b) => b.w - a.w);
           const div = built ? built.div : null;
           const byAcct = {};
           rows.forEach((x) => { byAcct[x.acct] = (byAcct[x.acct] || 0) + x.amt; });
@@ -320,12 +342,12 @@ function StrategyTracker({ accent }) {
                     {rows.map((x, i) => (
                       <tr key={x.t}>
                         <td className="ta-left tk-rank">{i + 1}</td>
-                        <td className="ta-left"><strong>{x.t}</strong> <span className="tk-book-sec">{x.sec}</span></td>
+                        <td className="ta-left"><strong>{x.t}</strong> <span className="tk-book-sec">{x.sec}</span>{x.isNew && <span className="tk-new-tag" title="Not currently in your book — proposed from the broader universe">new</span>}</td>
                         <td className="ta-left"><div className="tk-wrow"><div className="tk-wbar-wrap"><div className="tk-wbar" style={{ width: Math.min(100, x.w) + "%", background: r.model.color }} /></div><span className="mono tk-wpct">{x.w.toFixed(1)}%</span></div></td>
                         <td className="ta-right mono">{tMoney(x.amt)}</td>
                         <td className="ta-left">{(() => { const sg = window.signalsFor ? window.signalsFor(x.h0 || { ticker: x.t, price: x.px, sector: x.sec, divYield: 0, spark: [100, 103, 106, 108, 111] }, window.helmPresetCfg ? window.helmPresetCfg(r.model.id) : undefined) : null; const th = sg && window.helmTradeHorizon ? window.helmTradeHorizon(sg) : null; return th ? <span className="tk-hz" title={th.note} style={{ color: th.kind === "core" ? "#0a7d57" : th.kind === "quick" ? "#b45309" : "var(--ink-2)" }}>{th.tag}</span> : <span className="tk-hz">—</span>; })()}</td>
                         <td className="ta-left"><span className="tk-acct-tag">{acctName(x.acct)}</span></td>
-                        <td className="ta-center"><span className="tk-buy">Buy</span></td>
+                        <td className="ta-center">{window.TradeButton ? <window.TradeButton label="Log buy" ticker={x.t} side="buy" amount={x.amt} acctHint={x.acct} source="Tracker proposed book" small /> : <span className="tk-buy">Buy</span>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -443,6 +465,7 @@ const TK_BOOKS_CSS = `
 .tk-acct-pct { font-size: 11px; color: var(--muted); }
 .tk-book-table td { padding: 9px 12px; vertical-align: middle; }
 .tk-book-sec { font-size: 11px; color: var(--muted); margin-left: 4px; }
+.tk-new-tag { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #0a7d57; background: #0e9f6e1a; padding: 1px 5px; border-radius: 4px; margin-left: 6px; }
 .tk-wrow { display: flex; align-items: center; gap: 9px; }
 .tk-wbar-wrap { width: 90px; height: 7px; background: var(--line-2); border-radius: 4px; overflow: hidden; flex: none; }
 .tk-wbar { height: 100%; border-radius: 4px; }

@@ -23,6 +23,23 @@ function realQuality(r) {
   return clamp(Math.round(parts.reduce((s, p) => s + p[0] * p[1], 0) / wsum), 0, 100);
 }
 function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; }
+
+// ---- CRYPTO is its own book: no P/E, no ROE, no equity "valuation" concept exists for BTC.
+// Scoring it through fundamentals() below (hash-fallback pretending to be P/E-like) was noise.
+// Instead: valuation = cheapness vs the halving/liquidity cycle; quality = tier durability
+// (BTC/ETH have survived every cycle; deep alts haven't). Both are REAL signals already
+// computed elsewhere (HelmCryptoCycle, the relative-strength tier table) — this just stops
+// diluting them with a fake equity-style number.
+const CRYPTO_TIER = { BTC: 92, IBIT: 92, BTCC: 90, BTCY: 88, ETH: 80, ETHX: 78, ETHH: 78, ETHY: 76, SOL: 66, SOLQ: 64, BNB: 58, LINK: 54, LTC: 52, XRP: 50, SUI: 46, AVAX: 44, TRX: 40, ATOM: 42, NEAR: 40, APT: 36, ADA: 38, DOT: 34, DOGE: 30 };
+const CRYPTO_PHASE_VALUATION = { "Accumulation": 82, "Re-accumulation": 74, "Markup": 52, "Euphoria": 22, "Markdown": 60 };
+function cryptoFundamentals(h) {
+  const base = (h.ticker || "").replace(/\.(TO|B|U)$/i, "").toUpperCase();
+  const quality = CRYPTO_TIER[base] != null ? CRYPTO_TIER[base] : 36; // unlisted/long-tail alt = low durability tier
+  const cc = window.HelmCryptoCycle ? window.HelmCryptoCycle() : null;
+  const phase = cc ? (cc.eff || cc.phase) : null;
+  const valuation = phase && CRYPTO_PHASE_VALUATION[phase] != null ? CRYPTO_PHASE_VALUATION[phase] : 50;
+  return { quality, valuation, real: true, qualReal: true, cryptoNative: true, cyclePhase: phase };
+}
 function fundamentals(h) {
   const ticker = (h && h.ticker) || h;
   const fb = { quality: clamp(34 + hashStr(ticker + "·q") * 58, 0, 100), valuation: clamp(30 + hashStr(ticker + "·v") * 58, 0, 100), real: false };
@@ -66,7 +83,8 @@ function momentum(points) {
 // ---- the model ----
 function signalsFor(h, cfg) {
   const rsi = rsiFrom(h.spark);
-  const fnd = fundamentals(h);
+  const isCryptoAsset = h.sector === "Crypto" || h.market === "Crypto";
+  const fnd = isCryptoAsset ? cryptoFundamentals(h) : fundamentals(h);
   let cryptoStance = null;
   // momentum: prefer REAL 52-week range position (near high = uptrend) when feed-covered, else synthetic spark
   let mom = momentum(h.spark);
@@ -151,7 +169,18 @@ function signalsFor(h, cfg) {
   const widthMult = longTerm ? 2.6 : 1;
   const stop = h.price * (1 - clamp((0.06 + vol * 0.04) * cfg.stopMult * widthMult, 0.035, longTerm ? 0.38 : 0.20));
   const target = h.price * (1 + clamp((0.10 + vol * 0.08) * cfg.stopMult * widthMult, 0.08, longTerm ? 1.4 : 0.42));
-  return { rsi, mom, valueScore, trendScore, qualityScore, incomeScore, revScore, composite, conf, action, sellKind, sellFrac, stop, target, vol, horizon, realFund: fnd.real, qualReal: fnd.qualReal, cryptoStance, pe: fnd.pe, roe: fnd.roe, select: sel || null, selBoost };
+  const out = { rsi, mom, valueScore, trendScore, qualityScore, incomeScore, revScore, composite, conf, action, sellKind, sellFrac, stop, target, vol, horizon, realFund: fnd.real, qualReal: fnd.qualReal, cryptoStance, pe: fnd.pe, roe: fnd.roe, select: sel || null, selBoost };
+  // Phase 1b — close the Learning-Lab loop: apply any candidate rules the user has APPROVED
+  // into the live engine (engineconfig.js store + learninglab.jsx rule library, both looked up
+  // at call time). Skipped when cfg.__raw is set so the Lab's own sandbox isn't double-counted.
+  // Guarded so a bad rule can never crash scoring; fully reversible from the Learning Lab.
+  if (!cfg.__raw && window.HelmConfig && window.HelmCandidateRules) {
+    try {
+      const active = window.HelmConfig.activeRules();
+      for (let i = 0; i < active.length; i++) { const rule = window.HelmCandidateRules[active[i]]; if (rule) rule(out); }
+    } catch (e) {}
+  }
+  return out;
 }
 
 function rationale(h, s, cfg) {
@@ -186,9 +215,11 @@ function tradeHorizon(sig) {
   return { tag: "Watch · months", kind: "watch", note: "range-bound — no clear edge yet" };
 }
 const DEFAULT_WEIGHTS = { trend: 35, value: 20, reversion: 25, income: 20 };
-function presetCfg(r) {
+function presetCfg(r, raw) {
   const p = RISK[r];
-  return { weights: { ...(p.weights || DEFAULT_WEIGHTS) }, buyBar: p.buyBar, sellBar: p.sellBar, rsiOver: p.rsiOver, rsiUnder: p.rsiUnder, cashDeploy: p.cashDeploy, maxPos: p.maxPos, stopMult: p.stopMult };
+  const cfg = { weights: { ...(p.weights || DEFAULT_WEIGHTS) }, buyBar: p.buyBar, sellBar: p.sellBar, rsiOver: p.rsiOver, rsiUnder: p.rsiUnder, cashDeploy: p.cashDeploy, maxPos: p.maxPos, stopMult: p.stopMult };
+  if (raw) { cfg.__raw = true; return cfg; } // Learning Lab wants the pristine engine to stack its own rules on
+  return (window.HelmConfig && window.HelmConfig.applyTo) ? window.HelmConfig.applyTo(cfg) : cfg;
 }
 
 function MeterBar({ value, color }) { return <div className="sl-meter"><i style={{ width: `${value}%`, background: color }} /></div>; }
@@ -429,6 +460,12 @@ function StrategyLab({ accent, account }) {
                     <span style={{ color: sDOWN }}>SL {sMoney(h.sig.stop)}</span>
                     <span style={{ color: sUP }}>TP {sMoney(h.sig.target)}</span>
                   </div>
+                  {window.TradeButton && <window.TradeButton
+                    label={h._kind === "buy" ? "Log buy" : (h.sig.sellKind === "Exit" ? "Log exit" : "Log trim")}
+                    ticker={h.ticker} side={h._kind === "buy" ? "buy" : "sell"}
+                    amount={h._kind === "buy" ? h.alloc : h.dispValue * (h.sig.sellFrac || 0.33)}
+                    acctHint={h.acct} source="Strategy Lab" fullSell={h._kind !== "buy" && h.sig.sellKind === "Exit"} small
+                    style={{ marginTop: 6 }} />}
                 </div>
               </div>
             ))}

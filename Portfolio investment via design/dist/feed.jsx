@@ -8,7 +8,11 @@
   async function getJSON(base, name) {
     if (!base) return null;
     try {
-      const r = await fetch(base + "/" + name, { cache: "no-store" });
+      // cache-bust in 60s buckets: raw.githubusercontent has a ~5-min CDN edge cache that
+      // { cache: "no-store" } does NOT bypass, so a fresh daily commit wouldn't show for
+      // minutes. A 60s-bucketed query param forces a fresh origin pull at most once/min.
+      const bust = (name.indexOf("?") >= 0 ? "&" : "?") + "v=" + Math.floor(Date.now() / 60000);
+      const r = await fetch(base + "/" + name + bust, { cache: "no-store" });
       return r.ok ? await r.json() : null;
     } catch (e) { return null; }
   }
@@ -19,16 +23,25 @@
     async init(onUpdate) {
       this._onUpdate = onUpdate;
       if (!feedBase() && !quotesBase()) { this.status = { live: false, source: "mock", asOf: null }; return; }
-      const [quotes, fx] = await Promise.all([
+      const [quotes, prices, fx, macro, news, fundamentals] = await Promise.all([
         getJSON(quotesBase(), "quotes.json"),
+        getJSON(feedBase(), "prices.json"),
         getJSON(feedBase(), "fx.json"),
+        getJSON(feedBase(), "macro.json"),
+        getJSON(feedBase(), "news.json"),
+        getJSON(feedBase(), "fundamentals.json"),
       ]);
-      const ok = window.PMData.applyLive({ quotes, fx });
-      this.status = ok
-        ? { live: true, source: "feed", asOf: (quotes && quotes._updatedAt) || (fx && fx.asOf) || null,
+      this.macro = macro || null;
+      this.news = news || null;
+      this.fundamentals = fundamentals || null;
+      this.prices = prices || null;
+      const res = window.PMData.applyLive({ quotes, prices, fx }) || {};
+      this.status = res.live
+        ? { live: true, source: "feed", partial: !!res.partial, touched: res.touched,
+            asOf: (quotes && quotes._updatedAt) || (fx && fx.asOf) || null,
             marketOpen: quotes ? quotes._marketOpen : undefined }
         : { live: false, source: "mock", asOf: null };
-      if (ok && onUpdate) onUpdate();
+      if (res.live && onUpdate) onUpdate();
       // fast-lane polling every 60s while a quotes base is configured
       if (quotesBase()) {
         clearInterval(this._timer);
@@ -39,9 +52,9 @@
     async refresh() {
       const quotes = await getJSON(quotesBase(), "quotes.json");
       if (!quotes) return;
-      const ok = window.PMData.applyLive({ quotes });
-      if (ok) {
-        this.status = { ...this.status, live: true, source: "feed",
+      const res = window.PMData.applyLive({ quotes }) || {};
+      if (res.live) {
+        this.status = { ...this.status, live: true, source: "feed", touched: res.touched,
                         asOf: quotes._updatedAt || this.status.asOf, marketOpen: quotes._marketOpen };
         if (this._onUpdate) this._onUpdate();
       }

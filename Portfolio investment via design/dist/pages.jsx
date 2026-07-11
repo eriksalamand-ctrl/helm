@@ -221,6 +221,7 @@ function ResearchPage({ ticker, accent, onPick, onBack }) {
           </section>
         </div>
       </div>
+      <ChartAnalysis series={hist} ticker={ticker} name={name} sector={sec} accent={accent} />
     </div>
   );
 }

@@ -255,19 +255,38 @@ function PaperSim({ accent, initialTab, account }) {
     const shares = Math.max(1, Math.floor(dollars / px));
     const spend = shares * px;
     if (spend > avail) {setFlash({ t: `Not enough cash in ${acctName(acct)} (${psMoney(avail)}). Cash can't move between accounts.`, bad: true });return;}
+    // ---- IPS enforcement (Phase 1c): check the proposal against the enforced policy ----
+    let ipsWarn = null;
+    if (window.HelmIPS) {
+      const acctObj = (D.accounts || []).find((a) => a.id === acct);
+      const existingVal = s.positions.filter((p) => p.ticker === prop.h.ticker).reduce((a, p) => a + p.shares * psPrice(p.ticker, p.entry), 0);
+      const chk = window.HelmIPS.checkTrade({
+        ticker: prop.h.ticker, sector: prop.h.sector, market: prop.h.market, action: "buy",
+        amount: spend, acct, equity: totalValue || 1,
+        curWeightPct: totalValue ? (existingVal / totalValue) * 100 : 0,
+        reg: acctObj ? acctObj.reg : false, ccy: acctObj ? acctObj.ccy : undefined, assetCcy: assetCcy(prop.h),
+      });
+      if (chk.hardBlock) { setFlash({ t: "Blocked by policy — " + chk.note, bad: true }); return; }
+      if (chk.blocking) {
+        if (!window.confirm("Off-policy trade (Confirm mode)\n\n" + chk.note + "\n\nProceed anyway?")) {
+          setFlash({ t: "Held back — off-policy: " + chk.note, bad: false }); return;
+        }
+      }
+      if (chk.breaches.length) ipsWarn = chk.breaches[0].msg;
+    }
     setS((st) => ({
       ...st,
       cash: { ...st.cash, [acct]: (st.cash[acct] || 0) - spend },
       positions: [...st.positions, { id: prop.h.ticker + "·" + Date.now(), ticker: prop.h.ticker, name: prop.h.name, sector: prop.h.sector, shares, entry: px, acct, date: psToday(), horizon: window.helmTradeHorizon ? window.helmTradeHorizon(prop.sig).tag : "" }],
-      log: [{ date: psToday(), ts: Date.now(), kind: "accept", ticker: prop.h.ticker, shares, price: px, acct, score: prop.sig.composite, note: "Bought " + shares + " @ " + psMoney(px) }, ...st.log].slice(0, 200),
+      log: [{ date: psToday(), ts: Date.now(), kind: "accept", ticker: prop.h.ticker, shares, price: px, acct, score: prop.sig.composite, regime: window.HelmRegime ? window.HelmRegime.label : null, ips: ipsWarn || undefined, note: "Bought " + shares + " @ " + psMoney(px) }, ...st.log].slice(0, 200),
       decisions: { ...st.decisions, accepted: st.decisions.accepted + 1 }
     }));
-    setFlash({ t: "Accepted " + prop.h.ticker + " · " + shares + " sh in " + acctName(acct), bad: false });
+    setFlash({ t: (ipsWarn ? "⚠ Accepted off-policy — " : "Accepted ") + prop.h.ticker + " · " + shares + " sh in " + acctName(acct), bad: false });
   }
   function reject(prop) {
     setS((st) => ({
       ...st,
-      log: [{ date: psToday(), ts: Date.now(), kind: "reject", ticker: prop.h.ticker, price: prop.h.price, score: prop.sig.composite, note: "Passed on a Buy (score " + prop.sig.composite + ")", entryRef: prop.h.price }, ...st.log].slice(0, 200),
+      log: [{ date: psToday(), ts: Date.now(), kind: "reject", ticker: prop.h.ticker, price: prop.h.price, score: prop.sig.composite, regime: window.HelmRegime ? window.HelmRegime.label : null, note: "Passed on a Buy (score " + prop.sig.composite + ")", entryRef: prop.h.price }, ...st.log].slice(0, 200),
       decisions: { ...st.decisions, rejected: st.decisions.rejected + 1 }
     }));
     setFlash({ t: "Rejected " + prop.h.ticker + " — logged for learning", bad: false });
@@ -519,11 +538,28 @@ function PaperSim({ accent, initialTab, account }) {
       <section className="pm-card">
           <div className="pm-card-eyebrow">AI recommendations · {risk} · {horizon} — user approval gate</div>
           <p className="ps-prop-sub">Nothing affects the Twin until accepted. Accept routes the trade to an account's cash; reject is logged and shadow-measured for learning.</p>
-          {proposals.length === 0 ? <div className="ps-empty">No moves under this model right now — try the Aggressive preset or a different horizon. (No edge is itself a valid answer.)</div> :
-        <div className="ps-proposals">
-              {proposals.map((p) => <ProposalRow key={(p.kind || "buy") + "·" + p.h.ticker + "·" + (p.pos ? p.pos.acct : "")} prop={p} accent={accent} cashByAcct={cashByAcct} routeAcct={routeAcct} eligibleAccts={eligibleAccts} acctName={acctName} accounts={accounts} onAccept={accept} onReject={reject} onSell={sell} onTrim={trim} />)}
-            </div>
-        }
+          {(() => {
+            const buyN = proposals.filter((p) => p.kind === "buy").length;
+            const trimN = proposals.length - buyN;
+            if (proposals.length === 0) return (
+              <div className="ps-empty">
+                <strong>No proposition today.</strong> No new buy clears the {risk} · {horizon} bar, and no held position needs trimming or reallocation right now — you're within policy. A no-trade day is a valid, disciplined outcome. Widen the net with the Aggressive preset or a longer horizon, or use ＋ Buy to act on your own idea.
+              </div>
+            );
+            return (
+              <>
+                {buyN === 0 && trimN > 0 && (
+                  <div className="ps-prop-note">No <strong>new buys</strong> clear the bar today — the {trimN} proposal{trimN === 1 ? "" : "s"} below {trimN === 1 ? "is a" : "are"} <strong>trim / reallocation</strong> to keep the book on target.</div>
+                )}
+                {buyN > 0 && trimN > 0 && (
+                  <div className="ps-prop-note">{buyN} new buy{buyN === 1 ? "" : "s"} · {trimN} trim / reallocation{trimN === 1 ? "" : "s"} — risk-management moves are listed first.</div>
+                )}
+                <div className="ps-proposals">
+                  {proposals.map((p) => <ProposalRow key={(p.kind || "buy") + "·" + p.h.ticker + "·" + (p.pos ? p.pos.acct : "")} prop={p} accent={accent} cashByAcct={cashByAcct} routeAcct={routeAcct} eligibleAccts={eligibleAccts} acctName={acctName} accounts={accounts} onAccept={accept} onReject={reject} onSell={sell} onTrim={trim} />)}
+                </div>
+              </>
+            );
+          })()}
         </section>
       }
 
@@ -562,17 +598,23 @@ function PaperSim({ accent, initialTab, account }) {
                       <div className="ps-cstance-reason">{mix.cryptoStance.reason}</div>
                       <div className="ps-cstance-meta"><strong>{mix.cryptoStance.pace}</strong> · {mix.cryptoStance.trigger}</div>
                     </div>
+                    {window.TradeButton && mix.cryptoStance.stance !== "WAIT" && (
+                      mix.cryptoStance.stance === "DISTRIBUTE"
+                        ? <window.TradeButton label="Log a trim" ticker="BTCY.B" side="sell" acctHint="reer-cad" source="CIO crypto stance" small />
+                        : <window.TradeButton label={mix.cryptoStance.stance === "DCA" ? "Log DCA buy" : "Log a buy"} ticker="BTCY.B" side="buy" acctHint="reer-cad" source="CIO crypto stance" tag={mix.cryptoStance.stance === "DCA" ? "dca" : null} small />
+                    )}
                   </div>
                 ) : null}
                 {mix.cryptoTiers && (mix.cryptoTiers.btc + mix.cryptoTiers.growth + mix.cryptoTiers.alt) > 0 ? (
                   <div className="ps-cryptotier">
                     <div className="ps-cryptotier-h">Inside the crypto sleeve <span>{mix.cryptoTiers.why}</span></div>
                     <div className="ps-cryptotier-bars">
-                      {[["BTC core", mix.cryptoTiers.btc, "#f7931a"], ["ETH / SOL growth", mix.cryptoTiers.growth, "#627eea"], ["Alt satellite", mix.cryptoTiers.alt, "#a855f7"]].map(([lbl, v, col]) => (
+                      {[["BTC core", mix.cryptoTiers.btc, "#f7931a", "BTCY.B"], ["ETH / SOL growth", mix.cryptoTiers.growth, "#627eea", "ETHX.B"], ["Alt satellite", mix.cryptoTiers.alt, "#a855f7", ""]].map(([lbl, v, col, tkr]) => (
                         <div className="ps-cryptotier-row" key={lbl}>
                           <span className="ps-cryptotier-lbl"><span className="ps-cryptotier-dot" style={{ background: col }} />{lbl}</span>
                           <div className="ps-cryptotier-track"><div style={{ width: (mix.targets.crypto ? v / mix.targets.crypto * 100 : 0) + "%", background: col }} /></div>
                           <span className="ps-cryptotier-pct mono">{v}%</span>
+                          {window.TradeButton && <window.TradeButton label="Log buy" ticker={tkr} side="buy" acctHint={tkr ? "reer-cad" : undefined} source={"CIO tier \u00b7 " + lbl} small />}
                         </div>
                       ))}
                     </div>
@@ -831,7 +873,10 @@ const PS_CSS = `
 .ps-tabs-kpi strong { font-family: var(--mono); font-size: 13px; color: var(--ink); margin-left: 4px; }
 .ps-tabs button { font: inherit; font-size: 13px; font-weight: 600; padding: 9px 16px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 9px; background: var(--panel); color: var(--ink-2); cursor: pointer; display: flex; align-items: center; gap: 7px; }
 .ps-tab-n { font-family: var(--mono); font-size: 11px; background: var(--line-2); color: var(--ink-2); padding: 1px 7px; border-radius: 99px; }
-.ps-empty { font-size: 13px; color: var(--muted); padding: 16px 0; line-height: 1.5; }
+.ps-empty { font-size: 13px; color: var(--ink-2); padding: 16px; line-height: 1.6; background: var(--panel-2); border: 1px solid var(--line); border-radius: 11px; }
+.ps-empty strong { color: var(--ink); }
+.ps-prop-note { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; padding: 9px 13px; margin-bottom: 12px; background: color-mix(in srgb, var(--accent, #0e9f6e) 6%, white); border: 1px solid color-mix(in srgb, var(--accent, #0e9f6e) 20%, var(--line)); border-radius: 9px; }
+.ps-prop-note strong { color: var(--ink); }
 .ps-prop-sub { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; margin: 2px 0 14px; }
 .ps-twin-empty { padding: 8px 0; }
 .ps-twin-h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
@@ -925,7 +970,8 @@ const PS_CSS = `
 .ps-cio-note { font-size: 11.5px; color: var(--muted); line-height: 1.55; }
 .ps-cio-warn { font-size: 12px; color: #b45309; background: color-mix(in srgb, #d97706 12%, transparent); border-radius: 8px; padding: 8px 11px; line-height: 1.5; margin-bottom: 10px; }
 .ps-cryptotier { margin: 12px 0 4px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
-.ps-cstance { display: flex; gap: 11px; align-items: flex-start; margin: 12px 0 0; padding: 11px 13px; border-radius: 10px; border: 1px solid var(--line); }
+.ps-cstance { display: flex; gap: 11px; align-items: center; margin: 12px 0 0; padding: 11px 13px; border-radius: 10px; border: 1px solid var(--line); }
+.ps-cstance .lt-trigger { margin-left: auto; flex: none; }
 .ps-cstance-tag { font-size: 11px; font-weight: 800; letter-spacing: 0.04em; padding: 4px 9px; border-radius: 6px; flex: none; color: #fff; }
 .ps-cstance-wait .ps-cstance-tag { background: #64748b; }
 .ps-cstance-dca .ps-cstance-tag { background: #2563eb; }
@@ -941,7 +987,7 @@ const PS_CSS = `
 .ps-cryptotier-h { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2); margin-bottom: 9px; }
 .ps-cryptotier-h span { display: block; text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 .ps-cryptotier-bars { display: flex; flex-direction: column; gap: 6px; }
-.ps-cryptotier-row { display: grid; grid-template-columns: 140px 1fr 36px; align-items: center; gap: 10px; }
+.ps-cryptotier-row { display: grid; grid-template-columns: 140px 1fr 36px auto; align-items: center; gap: 10px; }
 .ps-cryptotier-lbl { font-size: 12px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
 .ps-cryptotier-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .ps-cryptotier-track { height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; }

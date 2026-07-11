@@ -81,6 +81,58 @@ function PeriodChart({ rows, accent, mode, kind }) {
   );
 }
 
+// ---- monthly tracking ledger — records a real net-worth snapshot per month (accumulates forward) ----
+const RD_LKEY = "helm_monthly_ledger_v1";
+function rdLedger() { try { return JSON.parse(localStorage.getItem(RD_LKEY)) || {}; } catch (e) { return {}; } }
+function rdRecordMonth() {
+  const led = rdLedger();
+  const ym = new Date().toISOString().slice(0, 7);
+  const entry = led[ym] || {};
+  entry.asOf = new Date().toISOString().slice(0, 10);
+  ["all", ...window.PMData.accounts.map((a) => a.id)].forEach((id) => {
+    try { entry[id] = Math.round(window.PMData.buildView(id).kpis.equity); } catch (e) {}
+  });
+  led[ym] = entry;
+  try { localStorage.setItem(RD_LKEY, JSON.stringify(led)); } catch (e) {}
+  return led;
+}
+
+function TrackedMonths({ accountId, accent }) {
+  const led = rdRecordMonth();
+  const key = accountId === "all" || accountId === "crypto" ? "all" : accountId;
+  const months = Object.keys(led).sort();
+  const rows = months.map((ym, i) => {
+    const close = led[ym][key];
+    const prev = i > 0 ? led[months[i - 1]][key] : null;
+    return { ym, asOf: led[ym].asOf, close, delta: prev != null && close != null ? close - prev : null, pct: prev ? (close - prev) / prev * 100 : null };
+  }).filter((r) => r.close != null).reverse();
+  return (
+    <section className="pm-card">
+      <div className="pm-card-head">
+        <div className="pm-card-eyebrow">Monthly tracking · real snapshots{accountId === "crypto" ? " · all accounts" : ""}</div>
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>auto-recorded on each visit · month-end value = last visit that month</span>
+      </div>
+      <div className="pm-table-wrap">
+        <table className="pm-table">
+          <thead><tr><th className="ta-left">Month</th><th className="ta-right">Closing value</th><th className="ta-right">Variation nette</th><th className="ta-right">Rendement</th><th className="ta-right">Snapshot</th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.ym}>
+                <td className="ta-left"><strong>{r.ym}</strong></td>
+                <td className="ta-right mono">{fmtMoney0(r.close)}</td>
+                <td className="ta-right mono" style={{ color: r.delta == null ? "var(--muted)" : r.delta >= 0 ? "#0e9f6e" : "#e02424" }}>{r.delta == null ? "— baseline" : (r.delta >= 0 ? "+" : "−") + "$" + Math.abs(r.delta).toLocaleString("en-US")}</td>
+                <td className="ta-right mono" style={{ color: r.pct == null ? "var(--muted)" : r.pct >= 0 ? "#0e9f6e" : "#e02424" }}>{r.pct == null ? "—" : (r.pct >= 0 ? "+" : "") + r.pct.toFixed(2) + "%"}</td>
+                <td className="ta-right mono" style={{ color: "var(--muted)", fontSize: 11 }}>{r.asOf}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="rd-note" style={{ marginTop: 10 }}>This ledger tracks <strong>real</strong> month-over-month net variation and return from {months[0]} forward — it fills itself as months pass (uses live-feed values when connected). Paste your statement history in chat to backfill earlier months as real data.</div>
+    </section>
+  );
+}
+
 function Rendement({ accountId, accent }) {
   const [kind, setKind] = useStateR("return");      // return | networth
   const [mode, setMode] = useStateR("individual");  // individual | cumulative
@@ -188,6 +240,8 @@ function Rendement({ accountId, accent }) {
           <PeriodChart rows={rows} accent={accent} mode={mode} kind={kind} />
         </div>
       </section>
+
+      <TrackedMonths accountId={accountId} accent={accent} />
 
       <section className="pm-card rd-score">
         <div className="pm-card-head">

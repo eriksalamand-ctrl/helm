@@ -1,9 +1,14 @@
 // feed-config.js — point Helm at your live data feed.
 // Leave EMPTY ("") to run on the built-in demo data (mock mode).
-// Set to the base URL that serves the JSON snapshots, e.g.:
-//   - Cloudflare Worker:  "https://helm-quotes.<you>.workers.dev"   (serves quotes.json)
-//   - GitHub Pages/raw:   "https://<you>.github.io/<repo>/feed/public"  (daily snapshots)
-// The fast-lane Worker and the slow-lane GitHub job can live at different bases —
-// set HELM_FEED_BASE to the daily snapshots and HELM_QUOTES_BASE to the Worker.
-window.HELM_FEED_BASE = "";    // daily: prices/fx/macro/news/fundamentals
-window.HELM_QUOTES_BASE = "";  // minute: quotes only (Cloudflare Worker). Falls back to HELM_FEED_BASE.
+//
+// We read directly from raw.githubusercontent.com — the daily GitHub Action commits
+// feed/public/*.json and raw serves them (CORS-enabled for GET).
+//
+// NOTE: in this repo the feed lives under the nested upload folder, so the path includes
+// "Portfolio investment via design/dist". The Action ran (verified: real data from
+// stooq/coingecko/bankofcanada/fred/finnhub/gdelt). If you later move feed/ to the repo
+// ROOT, change the base back to ".../main/feed/public".
+//
+// VERIFY: open <base>/meta.json in a browser — JSON = the top-bar pill flips Demo → Live.
+window.HELM_FEED_BASE = "https://raw.githubusercontent.com/eriksalamand-ctrl/helm/main/Portfolio%20investment%20via%20design/dist/feed/public";    // daily: prices/fx/macro/news/fundamentals
+window.HELM_QUOTES_BASE = "https://raw.githubusercontent.com/eriksalamand-ctrl/helm/main/Portfolio%20investment%20via%20design/dist/feed/public";  // minute quotes (set to your Cloudflare Worker URL once deployed; falls back to HELM_FEED_BASE)
