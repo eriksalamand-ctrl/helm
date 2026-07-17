@@ -1,541 +1,483 @@
-// @ds-adherence-ignore -- omelette starter scaffold (raw elements/hex/px by design)
+// tracker.jsx — Strategy Tracker: paper-trades several models continuously, scores them,
+// crowns a "champion", and keeps a dated journal in localStorage (the ML feedback loop).
+const { useState: useStateT, useMemo: useMemoT, useEffect: useEffectT } = React;
 
-/* BEGIN USAGE */
-// tweaks-panel.jsx
-// Reusable Tweaks shell + form-control helpers.
-// Exports (to window): useTweaks, TweaksPanel, TweakSection, TweakRow, TweakSlider,
-//   TweakToggle, TweakRadio, TweakSelect, TweakText, TweakNumber, TweakColor, TweakButton.
-//
-// Owns the host protocol (listens for __activate_edit_mode / __deactivate_edit_mode,
-// posts __edit_mode_available / __edit_mode_set_keys / __edit_mode_dismissed) so
-// individual prototypes don't re-roll it. Ships a consistent set of controls so you
-// don't hand-draw <input type="range">, segmented radios, steppers, etc.
-//
-// Usage (in an HTML file that loads React + Babel):
-//
-//   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-//     "primaryColor": "#D97757",
-//     "palette": ["#D97757", "#29261b", "#f6f4ef"],
-//     "fontSize": 16,
-//     "density": "regular",
-//     "dark": false
-//   }/*EDITMODE-END*/;
-//
-//   function App() {
-//     const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
-//     return (
-//       <div style={{ fontSize: t.fontSize, color: t.primaryColor }}>
-//         Hello
-//         <TweaksPanel>
-//           <TweakSection label="Typography" />
-//           <TweakSlider label="Font size" value={t.fontSize} min={10} max={32} unit="px"
-//                        onChange={(v) => setTweak('fontSize', v)} />
-//           <TweakRadio  label="Density" value={t.density}
-//                        options={['compact', 'regular', 'comfy']}
-//                        onChange={(v) => setTweak('density', v)} />
-//           <TweakSection label="Theme" />
-//           <TweakColor  label="Primary" value={t.primaryColor}
-//                        options={['#D97757', '#2A6FDB', '#1F8A5B', '#7A5AE0']}
-//                        onChange={(v) => setTweak('primaryColor', v)} />
-//           <TweakColor  label="Palette" value={t.palette}
-//                        options={[['#D97757', '#29261b', '#f6f4ef'],
-//                                  ['#475569', '#0f172a', '#f1f5f9']]}
-//                        onChange={(v) => setTweak('palette', v)} />
-//           <TweakToggle label="Dark mode" value={t.dark}
-//                        onChange={(v) => setTweak('dark', v)} />
-//         </TweaksPanel>
-//       </div>
-//     );
-//   }
-//
-// TweakRadio is the segmented control for 2–3 short options (auto-falls-back to
-// TweakSelect past ~16/~10 chars per label); reach for TweakSelect directly when
-// options are many or long. For color tweaks always curate 3-4 options rather than
-// a free picker; an option can also be a whole 2–5 color palette (the stored value
-// is the array). The Tweak* controls are a floor, not a ceiling — build custom
-// controls inside the panel if a tweak calls for UI they don't cover.
-/* END USAGE */
-// ─────────────────────────────────────────────────────────────────────────────
+const tUP = "#0e9f6e", tDOWN = "#e02424", tWARN = "#d97706";
+const tPct = (n, dp = 1) => `${n >= 0 ? "+" : ""}${n.toFixed(dp)}%`;
+const tMoney = (n) => "$" + Math.round(n).toLocaleString("en-US");
+const tClamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const tMean = (a) => a.reduce((s, x) => s + x, 0) / (a.length || 1);
+const tStd = (a) => { const m = tMean(a); return Math.sqrt(tMean(a.map((x) => (x - m) ** 2))); };
 
-const __TWEAKS_STYLE = `
-  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:280px;
-    max-height:calc(100vh - 32px);display:flex;flex-direction:column;
-    transform:scale(var(--dc-inv-zoom,1));transform-origin:bottom right;
-    background:rgba(250,249,247,.78);color:#29261b;
-    -webkit-backdrop-filter:blur(24px) saturate(160%);backdrop-filter:blur(24px) saturate(160%);
-    border:.5px solid rgba(255,255,255,.6);border-radius:14px;
-    box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 12px 40px rgba(0,0,0,.18);
-    font:11.5px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;overflow:hidden}
-  .twk-hd{display:flex;align-items:center;justify-content:space-between;
-    padding:10px 8px 10px 14px;cursor:move;user-select:none}
-  .twk-hd b{font-size:12px;font-weight:600;letter-spacing:.01em}
-  .twk-x{appearance:none;border:0;background:transparent;color:rgba(41,38,27,.55);
-    width:22px;height:22px;border-radius:6px;cursor:default;font-size:13px;line-height:1}
-  .twk-x:hover{background:rgba(0,0,0,.06);color:#29261b}
-  .twk-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:10px;
-    overflow-y:auto;overflow-x:hidden;min-height:0;
-    scrollbar-width:thin;scrollbar-color:rgba(0,0,0,.15) transparent}
-  .twk-body::-webkit-scrollbar{width:8px}
-  .twk-body::-webkit-scrollbar-track{background:transparent;margin:2px}
-  .twk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:4px;
-    border:2px solid transparent;background-clip:content-box}
-  .twk-body::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.25);
-    border:2px solid transparent;background-clip:content-box}
-  .twk-row{display:flex;flex-direction:column;gap:5px}
-  .twk-row-h{flex-direction:row;align-items:center;justify-content:space-between;gap:10px}
-  .twk-lbl{display:flex;justify-content:space-between;align-items:baseline;
-    color:rgba(41,38,27,.72)}
-  .twk-lbl>span:first-child{font-weight:500}
-  .twk-val{color:rgba(41,38,27,.5);font-variant-numeric:tabular-nums}
-
-  .twk-sect{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
-    color:rgba(41,38,27,.45);padding:10px 0 0}
-  .twk-sect:first-child{padding-top:0}
-
-  .twk-field{appearance:none;box-sizing:border-box;width:100%;min-width:0;height:26px;padding:0 8px;
-    border:.5px solid rgba(0,0,0,.1);border-radius:7px;
-    background:rgba(255,255,255,.6);color:inherit;font:inherit;outline:none}
-  .twk-field:focus{border-color:rgba(0,0,0,.25);background:rgba(255,255,255,.85)}
-  select.twk-field{padding-right:22px;
-    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(0,0,0,.5)' d='M0 0h10L5 6z'/></svg>");
-    background-repeat:no-repeat;background-position:right 8px center}
-
-  .twk-slider{appearance:none;-webkit-appearance:none;width:100%;height:4px;margin:6px 0;
-    border-radius:999px;background:rgba(0,0,0,.12);outline:none}
-  .twk-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
-    width:14px;height:14px;border-radius:50%;background:#fff;
-    border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
-  .twk-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
-    background:#fff;border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
-
-  .twk-seg{position:relative;display:flex;padding:2px;border-radius:8px;
-    background:rgba(0,0,0,.06);user-select:none}
-  .twk-seg-thumb{position:absolute;top:2px;bottom:2px;border-radius:6px;
-    background:rgba(255,255,255,.9);box-shadow:0 1px 2px rgba(0,0,0,.12);
-    transition:left .15s cubic-bezier(.3,.7,.4,1),width .15s}
-  .twk-seg.dragging .twk-seg-thumb{transition:none}
-  .twk-seg button{appearance:none;position:relative;z-index:1;flex:1;border:0;
-    background:transparent;color:inherit;font:inherit;font-weight:500;min-height:22px;
-    border-radius:6px;cursor:default;padding:4px 6px;line-height:1.2;
-    overflow-wrap:anywhere}
-
-  .twk-toggle{position:relative;width:32px;height:18px;border:0;border-radius:999px;
-    background:rgba(0,0,0,.15);transition:background .15s;cursor:default;padding:0}
-  .twk-toggle[data-on="1"]{background:#34c759}
-  .twk-toggle i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
-    background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
-  .twk-toggle[data-on="1"] i{transform:translateX(14px)}
-
-  .twk-num{display:flex;align-items:center;box-sizing:border-box;min-width:0;height:26px;padding:0 0 0 8px;
-    border:.5px solid rgba(0,0,0,.1);border-radius:7px;background:rgba(255,255,255,.6)}
-  .twk-num-lbl{font-weight:500;color:rgba(41,38,27,.6);cursor:ew-resize;
-    user-select:none;padding-right:8px}
-  .twk-num input{flex:1;min-width:0;height:100%;border:0;background:transparent;
-    font:inherit;font-variant-numeric:tabular-nums;text-align:right;padding:0 8px 0 0;
-    outline:none;color:inherit;-moz-appearance:textfield}
-  .twk-num input::-webkit-inner-spin-button,.twk-num input::-webkit-outer-spin-button{
-    -webkit-appearance:none;margin:0}
-  .twk-num-unit{padding-right:8px;color:rgba(41,38,27,.45)}
-
-  .twk-btn{appearance:none;height:26px;padding:0 12px;border:0;border-radius:7px;
-    background:rgba(0,0,0,.78);color:#fff;font:inherit;font-weight:500;cursor:default}
-  .twk-btn:hover{background:rgba(0,0,0,.88)}
-  .twk-btn.secondary{background:rgba(0,0,0,.06);color:inherit}
-  .twk-btn.secondary:hover{background:rgba(0,0,0,.1)}
-
-  .twk-swatch{appearance:none;-webkit-appearance:none;width:56px;height:22px;
-    border:.5px solid rgba(0,0,0,.1);border-radius:6px;padding:0;cursor:default;
-    background:transparent;flex-shrink:0}
-  .twk-swatch::-webkit-color-swatch-wrapper{padding:0}
-  .twk-swatch::-webkit-color-swatch{border:0;border-radius:5.5px}
-  .twk-swatch::-moz-color-swatch{border:0;border-radius:5.5px}
-
-  .twk-chips{display:flex;gap:6px}
-  .twk-chip{position:relative;appearance:none;flex:1;min-width:0;height:46px;
-    padding:0;border:0;border-radius:6px;overflow:hidden;cursor:default;
-    box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.06);
-    transition:transform .12s cubic-bezier(.3,.7,.4,1),box-shadow .12s}
-  .twk-chip:hover{transform:translateY(-1px);
-    box-shadow:0 0 0 .5px rgba(0,0,0,.18),0 4px 10px rgba(0,0,0,.12)}
-  .twk-chip[data-on="1"]{box-shadow:0 0 0 1.5px rgba(0,0,0,.85),
-    0 2px 6px rgba(0,0,0,.15)}
-  .twk-chip>span{position:absolute;top:0;bottom:0;right:0;width:34%;
-    display:flex;flex-direction:column;box-shadow:-1px 0 0 rgba(0,0,0,.1)}
-  .twk-chip>span>i{flex:1;box-shadow:0 -1px 0 rgba(0,0,0,.1)}
-  .twk-chip>span>i:first-child{box-shadow:none}
-  .twk-chip svg{position:absolute;top:6px;left:6px;width:13px;height:13px;
-    filter:drop-shadow(0 1px 1px rgba(0,0,0,.3))}
-`;
-
-// ── useTweaks ───────────────────────────────────────────────────────────────
-// Single source of truth for tweak values. setTweak persists via the host
-// (__edit_mode_set_keys → host rewrites the EDITMODE block on disk).
-function useTweaks(defaults) {
-  const [values, setValues] = React.useState(defaults);
-  // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
-  // useState-style call doesn't write a "[object Object]" key into the persisted
-  // JSON block.
-  const setTweak = React.useCallback((keyOrEdits, val) => {
-    const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
-      ? keyOrEdits : { [keyOrEdits]: val };
-    setValues((prev) => ({ ...prev, ...edits }));
-    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, '*');
-    // Same-window signal so in-page listeners (deck-stage rail thumbnails)
-    // can react — the parent message only reaches the host, not peers.
-    window.dispatchEvent(new CustomEvent('tweakchange', { detail: edits }));
-  }, []);
-  return [values, setTweak];
+// --- factor proxies (independent of strategy.jsx) ---
+function tHash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; }
+function tMom(spark) {
+  if (!spark || spark.length < 2) return 50;
+  const f = spark[0], l = spark[spark.length - 1], r = Math.max(...spark) - Math.min(...spark) || 1;
+  return tClamp(((l - f) / r) * 60 + 50, 0, 100);
+}
+function tRsi(spark) {
+  if (!spark || spark.length < 2) return 50;
+  let g = 0, l = 0, n = 0;
+  for (let i = 1; i < spark.length; i++) { const d = spark[i] - spark[i - 1]; if (d >= 0) g += d; else l -= d; n++; }
+  const ag = g / n, al = l / n; if (al === 0) return 100; return 100 - 100 / (1 + ag / al);
 }
 
-// ── TweaksPanel ─────────────────────────────────────────────────────────────
-// Floating shell. Registers the protocol listener BEFORE announcing
-// availability — if the announce ran first, the host's activate could land
-// before our handler exists and the toolbar toggle would silently no-op.
-// The close button posts __edit_mode_dismissed so the host's toolbar toggle
-// flips off in lockstep; the host echoes __deactivate_edit_mode back which
-// is what actually hides the panel.
-function TweaksPanel({ title = 'Tweaks', children }) {
-  const [open, setOpen] = React.useState(false);
-  const dragRef = React.useRef(null);
-  const offsetRef = React.useRef({ x: 16, y: 16 });
-  const PAD = 16;
+// route a pick you don't currently hold to a plausible account (mirrors Papersim's eligibility
+// rule): direct crypto -> the crypto (non-registered) account only; USD assets -> a USD account;
+// CAD -> a CAD account. Held picks keep routing to wherever they actually sit (p.h.acct).
+function routeForNewPick(h, accounts) {
+  const isDirectCoin = (h.market === "Crypto" || h.sector === "Crypto") && !/\.(TO|B)$/.test(h.ticker || "") && !/Q$|ETF/i.test(h.ticker || "") && (h.ticker || "").length <= 5;
+  const wantCcy = (h.market === "US" || h.market === "US-ETF" || h.market === "Crypto" || h.ccy === "USD") ? "USD" : "CAD";
+  const pool = (isDirectCoin ? accounts.filter((a) => !a.reg) : accounts.filter((a) => a.ccy === wantCcy));
+  const acct = pool[0] || accounts[0];
+  return acct ? acct.id : null;
+}
 
-  const clampToViewport = React.useCallback(() => {
-    const panel = dragRef.current;
-    if (!panel) return;
-    const w = panel.offsetWidth, h = panel.offsetHeight;
-    const maxRight = Math.max(PAD, window.innerWidth - w - PAD);
-    const maxBottom = Math.max(PAD, window.innerHeight - h - PAD);
-    offsetRef.current = {
-      x: Math.min(maxRight, Math.max(PAD, offsetRef.current.x)),
-      y: Math.min(maxBottom, Math.max(PAD, offsetRef.current.y)),
-    };
-    panel.style.right = offsetRef.current.x + 'px';
-    panel.style.bottom = offsetRef.current.y + 'px';
-  }, []);
+// the three tracked portfolios = the Strategy Lab's risk-model presets.
+// Each proposes trades from the same universe but with a different posture, sizing and concentration.
+const MODELS = [
+  { id: "conservative", name: "Conservative", color: "#0e9f6e", topN: 14, conc: 0.6,
+    blurb: "Smaller, diversified positions; quality + income lean, tight stops.",
+    score: (h, f) => f.quality * 0.38 + f.income * 0.30 + (100 - f.rsi) * 0.17 + f.mom * 0.15 },
+  { id: "balanced", name: "Balanced", color: "#4f46e5", topN: 8, conc: 1.0,
+    blurb: "Moderate sizing; all factors blended evenly.",
+    score: (h, f) => (f.mom + f.value + f.quality + f.income + (100 - f.rsi)) / 5 },
+  { id: "aggressive", name: "Aggressive", color: "#d97706", topN: 5, conc: 1.8,
+    blurb: "Concentrated, momentum-led; chasing the 60%/yr goal.",
+    score: (h, f) => f.mom * 0.55 + f.value * 0.2 + f.quality * 0.15 + (100 - f.rsi) * 0.10 },
+];
 
-  React.useEffect(() => {
-    if (!open) return;
-    clampToViewport();
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', clampToViewport);
-      return () => window.removeEventListener('resize', clampToViewport);
-    }
-    const ro = new ResizeObserver(clampToViewport);
-    ro.observe(document.documentElement);
-    return () => ro.disconnect();
-  }, [open, clampToViewport]);
+// CIO overweight sectors (from the June 2026 view): US/EM equities, semis, fintech, gold/materials
+const CIO_FAV = { Semiconductors: 85, Software: 70, Fintech: 78, Materials: 72, Energy: 60, Crypto: 65 };
 
-  React.useEffect(() => {
-    const onMsg = (e) => {
-      const t = e?.data?.type;
-      if (t === '__activate_edit_mode') setOpen(true);
-      else if (t === '__deactivate_edit_mode') setOpen(false);
-    };
-    window.addEventListener('message', onMsg);
-    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
-    return () => window.removeEventListener('message', onMsg);
-  }, []);
-
-  const dismiss = () => {
-    setOpen(false);
-    window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*');
+function factorsFor(h) {
+  return {
+    mom: tMom(h.spark),
+    rsi: tRsi(h.spark),
+    value: tClamp(30 + tHash(h.ticker + "v") * 58, 0, 100),
+    quality: tClamp(34 + tHash(h.ticker + "q") * 58, 0, 100),
+    income: tClamp((h.divYield || 0) * 11, 0, 100),
+    cioTilt: CIO_FAV[h.sector] || 45,
   };
+}
 
-  const onDragStart = (e) => {
-    const panel = dragRef.current;
-    if (!panel) return;
-    const r = panel.getBoundingClientRect();
-    const sx = e.clientX, sy = e.clientY;
-    const startRight = window.innerWidth - r.right;
-    const startBottom = window.innerHeight - r.bottom;
-    const move = (ev) => {
-      offsetRef.current = {
-        x: startRight - (ev.clientX - sx),
-        y: startBottom - (ev.clientY - sy),
-      };
-      clampToViewport();
-    };
-    const up = () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-    };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-  };
+// build a paper portfolio for a model and simulate a forward equity curve
+function runModel(model, universe, sp500) {
+  const topN = model.topN || 8, conc = model.conc || 1;
+  const scored = universe.map((h) => ({ h, f: factorsFor(h), s: 0 }));
+  scored.forEach((x) => { x.s = model.score(x.h, x.f); });
+  scored.sort((a, b) => b.s - a.s);
+  const picks = scored.slice(0, topN);
+  const totalConv = picks.reduce((s, p) => s + Math.pow(Math.max(1, p.s - 45), conc), 0) || 1;
+  picks.forEach((p) => { p.w = Math.pow(Math.max(1, p.s - 45), conc) / totalConv; });
 
-  if (!open) return null;
+  // deterministic ~120-trading-day forward path per pick, ending near its realized plPct.
+  // Not-currently-held picks (from the broader universe) have no cost basis to realize a
+  // plPct from — assume a modest tilt off the pick's own momentum factor instead of NaN.
+  const PH = window.PMData.priceHistory;
+  const N = 120;
+  const curve = new Array(N).fill(0);
+  picks.forEach((p) => {
+    const plBasis = typeof p.h.plPct === "number" ? p.h.plPct / 100 : ((p.f.mom - 50) / 50) * 0.35;
+    const tot = tClamp(plBasis, -0.6, 2.0);
+    const seed = typeof p.h.seed === "number" ? p.h.seed : Math.round(tHash(p.h.ticker || "?") * 100000);
+    const path = PH(seed * 9 + 7, N, Math.max(1, p.h.price), tot, 0.018);
+    const base = path[0] || 1;
+    for (let i = 0; i < N; i++) curve[i] += p.w * (path[i] / base);
+  });
+  // benchmark (S&P) normalized over same window
+  const bSlice = sp500.slice(-N);
+  const bBase = bSlice[0] || 1;
+  const bench = bSlice.map((v) => v / bBase);
+
+  const ret = (curve[curve.length - 1] - 1) * 100;
+  const benchRet = (bench[bench.length - 1] - 1) * 100;
+  const rets = curve.slice(1).map((v, i) => v / curve[i] - 1);
+  const sharpe = (tMean(rets) * 252 - 0.025) / ((tStd(rets) * Math.sqrt(252)) || 1);
+  let peak = -Infinity, mdd = 0;
+  curve.forEach((v) => { peak = Math.max(peak, v); mdd = Math.min(mdd, v / peak - 1); });
+  const hits = picks.filter((p) => (p.h.plPct || 0) >= 0).length;
+  const hitRate = (hits / picks.length) * 100;
+
+  return { model, picks, curve, bench, ret, benchRet, sharpe, mdd: mdd * 100, hitRate, va: ret - benchRet };
+}
+
+// multi-line equity chart
+function TrackChart({ runs, accent, actual, height = 300 }) {
+  const W = 1000, H = height, padT = 14, padB = 26, padL = 44, padR = 12;
+  const all = runs.flatMap((r) => r.curve).concat(runs[0].bench).concat(actual || []);
+  const lo = Math.min(...all), hi = Math.max(...all);
+  const n = runs[0].curve.length;
+  const x = (i) => padL + (i / (n - 1)) * (W - padL - padR);
+  const y = (v) => padT + (1 - (v - lo) / (hi - lo || 1)) * (H - padT - padB);
+  const line = (arr) => (window.smoothPath ? window.smoothPath(arr.map((v, i) => [x(i), y(v)]), 0.5)
+    : arr.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" "));
+  const yTicks = [lo, (lo + hi) / 2, hi];
   return (
-    <>
-      <style>{__TWEAKS_STYLE}</style>
-      <div ref={dragRef} className="twk-panel" data-omelette-chrome=""
-           style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
-        <div className="twk-hd" onMouseDown={onDragStart}>
-          <b>{title}</b>
-          <button className="twk-x" aria-label="Close tweaks"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={dismiss}>✕</button>
-        </div>
-        <div className="twk-body">
-          {children}
-        </div>
-      </div>
-    </>
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }}>
+      {yTicks.map((v, i) => (
+        <g key={i}>
+          <line x1={padL} y1={y(v)} x2={W - padR} y2={y(v)} stroke="currentColor" strokeOpacity="0.08" />
+          <text x={padL - 8} y={y(v) + 4} textAnchor="end" className="tk-ytick">{((v - 1) * 100 >= 0 ? "+" : "") + ((v - 1) * 100).toFixed(0)}%</text>
+        </g>
+      ))}
+      <path d={line(runs[0].bench)} fill="none" stroke="currentColor" strokeOpacity="0.3" strokeWidth="1.6" strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />
+      {actual && actual.length ? <path d={line(actual)} fill="none" stroke="currentColor" strokeOpacity="0.6" strokeWidth="2" strokeDasharray="7 4" vectorEffect="non-scaling-stroke" /> : null}
+      {runs.map((r) => (
+        <path key={r.model.id} d={line(r.curve)} fill="none" stroke={r.model.color} strokeWidth="2.2" vectorEffect="non-scaling-stroke" />
+      ))}
+    </svg>
   );
 }
 
-// ── Layout helpers ──────────────────────────────────────────────────────────
+const JOURNAL_KEY = "helm_tracker_journal_v1";
+function loadJournal() { try { return JSON.parse(localStorage.getItem(JOURNAL_KEY) || "[]"); } catch (e) { return []; } }
+function saveJournal(j) { try { localStorage.setItem(JOURNAL_KEY, JSON.stringify(j)); } catch (e) {} }
 
-function TweakSection({ label, children }) {
-  return (
-    <>
-      <div className="twk-sect">{label}</div>
-      {children}
-    </>
-  );
-}
+function StrategyTracker({ accent }) {
+  const D = window.PMData;
+  const [journal, setJournal] = useStateT(loadJournal);
+  const [flash, setFlash] = useStateT(false);
+  const [bookId, setBookId] = useStateT(null);
+  const view0 = D.buildView("all");
+  const equity = view0.kpis.equity;
+  const dispCcy = view0.kpis.ccy;
+  const acctName = (id) => { const a = (D.accounts || []).find((x) => x.id === id); return a ? a.name : "Unassigned"; };
+  const acctLabel = (id) => { const a = (D.accounts || []).find((x) => x.id === id); return a ? a.label : ""; };
 
-function TweakRow({ label, value, children, inline = false }) {
-  return (
-    <div className={inline ? 'twk-row twk-row-h' : 'twk-row'}>
-      <div className="twk-lbl">
-        <span>{label}</span>
-        {value != null && <span className="twk-val">{value}</span>}
-      </div>
-      {children}
-    </div>
-  );
-}
+  const runs = useMemoT(() => {
+    const held = D.buildView("all").holdings;
+    // dedupe by ticker so a name held in 2 accounts isn't double-counted
+    const seen = {}; const uni = [];
+    held.forEach((h) => { if (!seen[h.ticker]) { seen[h.ticker] = 1; uni.push(h); } });
+    // broaden beyond your book: the 3 models should be able to propose names you don't already
+    // own, not just reshuffle existing holdings (mirrors what Papersim's buy engine already does).
+    (window.HelmUniverse || []).forEach((u) => {
+      if (!u || !u.ticker || seen[u.ticker]) return;
+      seen[u.ticker] = 1;
+      uni.push({ ticker: u.ticker, name: u.name, market: u.market, sector: u.sector, price: u.price, divYield: u.divYield, spark: u.spark, weight: 0, plPct: null });
+    });
+    return MODELS.map((m) => runModel(m, uni, D.sp500)).sort((a, b) => b.ret - a.ret);
+  }, []);
+  const champ = runs[0];
 
-// ── Controls ────────────────────────────────────────────────────────────────
+  // the user's actual portfolio, normalized to the same 120-pt window (grey dashed reference)
+  const actualCurve = useMemoT(() => {
+    const p = (D.buildView("all").portfolio || []).slice(-120);
+    if (!p.length) return null;
+    const base = p[0] || 1;
+    return p.map((v) => v / base);
+  }, []);
 
-function TweakSlider({ label, value, min = 0, max = 100, step = 1, unit = '', onChange }) {
-  return (
-    <TweakRow label={label} value={`${value}${unit}`}>
-      <input type="range" className="twk-slider" min={min} max={max} step={step}
-             value={value} onChange={(e) => onChange(Number(e.target.value))} />
-    </TweakRow>
-  );
-}
-
-function TweakToggle({ label, value, onChange }) {
-  return (
-    <div className="twk-row twk-row-h">
-      <div className="twk-lbl"><span>{label}</span></div>
-      <button type="button" className="twk-toggle" data-on={value ? '1' : '0'}
-              role="switch" aria-checked={!!value}
-              onClick={() => onChange(!value)}><i /></button>
-    </div>
-  );
-}
-
-function TweakRadio({ label, value, options, onChange }) {
-  const trackRef = React.useRef(null);
-  const [dragging, setDragging] = React.useState(false);
-  // The active value is read by pointer-move handlers attached for the lifetime
-  // of a drag — ref it so a stale closure doesn't fire onChange for every move.
-  const valueRef = React.useRef(value);
-  valueRef.current = value;
-
-  // Segments wrap mid-word once per-segment width runs out. The track is
-  // ~248px (280 panel − 28 body pad − 4 seg pad), each button loses 12px
-  // to its own padding, and 11.5px system-ui averages ~6.3px/char — so 2
-  // options fit ~16 chars each, 3 fit ~10. Past that (or >3 options), fall
-  // back to a dropdown rather than wrap.
-  const labelLen = (o) => String(typeof o === 'object' ? o.label : o).length;
-  const maxLen = options.reduce((m, o) => Math.max(m, labelLen(o)), 0);
-  const fitsAsSegments = maxLen <= ({ 2: 16, 3: 10 }[options.length] ?? 0);
-  if (!fitsAsSegments) {
-    // <select> emits strings — map back to the original option value so the
-    // fallback stays type-preserving (numbers, booleans) like the segment path.
-    const resolve = (s) => {
-      const m = options.find((o) => String(typeof o === 'object' ? o.value : o) === s);
-      return m === undefined ? s : typeof m === 'object' ? m.value : m;
-    };
-    return <TweakSelect label={label} value={value} options={options}
-                        onChange={(s) => onChange(resolve(s))} />;
+  // current price per ticker (live-updated by the feed) — used to mark past proposals to market
+  const priceNow = {};
+  D.allHoldings.forEach((h) => { priceNow[h.ticker] = h.price; });
+  // realized weighted return of a snapshot's proposed picks vs their entry prices
+  function realizedSince(entry) {
+    if (!entry.picks || !entry.picks.length) return null;
+    let wsum = 0, acc = 0, n = 0;
+    entry.picks.forEach((p) => {
+      const now = priceNow[p.t];
+      if (now && p.entry) { acc += (p.w || 1) * (now / p.entry - 1); wsum += (p.w || 1); n++; }
+    });
+    return n ? { ret: (acc / (wsum || 1)) * 100, n } : null;
   }
-  const opts = options.map((o) => (typeof o === 'object' ? o : { value: o, label: o }));
-  const idx = Math.max(0, opts.findIndex((o) => o.value === value));
-  const n = opts.length;
 
-  const segAt = (clientX) => {
-    const r = trackRef.current.getBoundingClientRect();
-    const inner = r.width - 4;
-    const i = Math.floor(((clientX - r.left - 2) / inner) * n);
-    return opts[Math.max(0, Math.min(n - 1, i))].value;
-  };
+  function buildEntry() {
+    return {
+      v: 2,
+      date: new Date().toISOString().slice(0, 10),
+      regime: window.HelmRegime ? window.HelmRegime.label : null,
+      champion: champ.model.name,
+      // every model recorded daily — return, value-added, AND its FULL proposed book (entry prices) so
+      // the feed can mark each model's book to market later (not just the champion's top 5)
+      models: runs.map((r) => ({ id: r.model.id, name: r.model.name, ret: +r.ret.toFixed(1), va: +r.va.toFixed(1),
+        picks: r.picks.map((p) => ({ t: p.h.ticker, entry: p.h.price, w: +(p.w || 0).toFixed(3), c: +(p.s || 0).toFixed(1) })) })),
+      topPick: champ.picks[0] ? champ.picks[0].h.ticker : "\u2014",
+      picks: champ.picks.map((p) => ({ t: p.h.ticker, entry: p.h.price, w: +(p.w || 0).toFixed(3), c: +(p.s || 0).toFixed(1) })),
+    };
+  }
+  function recordSnapshot(silent) {
+    const entry = buildEntry();
+    const next = [entry, ...journal.filter((e) => e.date !== entry.date)].slice(0, 30);
+    setJournal(next); saveJournal(next);
+    if (!silent) { setFlash(true); setTimeout(() => setFlash(false), 1500); }
+  }
+  // auto-record today's signals for all 3 models, once per day (no manual click needed)
+  useEffectT(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const te = journal.find((e) => e.date === today);
+    const stale = te && (te.v !== 2 || !(te.models && te.models[0] && Array.isArray(te.models[0].picks)));
+    if (!te || stale) recordSnapshot(true);
+  }, []);
+  function clearJournal() { setJournal([]); saveJournal([]); }
 
-  const onPointerDown = (e) => {
-    setDragging(true);
-    const v0 = segAt(e.clientX);
-    if (v0 !== valueRef.current) onChange(v0);
-    const move = (ev) => {
-      if (!trackRef.current) return;
-      const v = segAt(ev.clientX);
-      if (v !== valueRef.current) onChange(v);
-    };
-    const up = () => {
-      setDragging(false);
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  };
+  // seed a realistic back-dated history so the learning loop (ledger/drift/simulation) populates.
+  // entry prices are jittered off current price so realized-since deltas vary by date & champion.
+  function seedHistory() {
+    const days = [70, 56, 42, 30, 21, 14, 7, 2]; // trading-ish spacing, oldest first
+    let s = 20260101;
+    const rnd = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+    const seeded = days.map((ago) => {
+      const d = new Date(); d.setDate(d.getDate() - ago);
+      // rotate champion deterministically; vary model returns plausibly
+      const order = [...runs].sort(() => rnd() - 0.5);
+      const ch = order[0];
+      // older snapshots: entries set so realized drifts (older = bigger move, mixed sign)
+      const horizonScale = ago / 70;
+      const picks = ch.picks.slice(0, 5).map((p) => {
+        const move = (rnd() - 0.42) * 0.5 * horizonScale; // entry below/above current
+        const entry = +(p.h.price / (1 + move)).toFixed(2);
+        return { t: p.h.ticker, entry, w: +(p.w || 0).toFixed(3) };
+      });
+      return {
+        date: d.toISOString().slice(0, 10),
+        regime: window.HelmRegime ? window.HelmRegime.label : "Slowdown",
+        champion: ch.model.name,
+        models: order.map((r) => ({ id: r.model.id, name: r.model.name, ret: +(r.ret + (rnd() - 0.5) * 8).toFixed(1), va: +(r.va + (rnd() - 0.5) * 4).toFixed(1) })),
+        topPick: ch.picks[0] ? ch.picks[0].h.ticker : "—",
+        picks, seeded: true,
+      };
+    });
+    const dates = new Set(seeded.map((e) => e.date));
+    const next = [...seeded.reverse(), ...journal.filter((e) => !dates.has(e.date))].slice(0, 30);
+    setJournal(next); saveJournal(next);
+    setFlash(true); setTimeout(() => setFlash(false), 1500);
+  }
+
+  // champion consistency across journal
+  const champCounts = {};
+  journal.forEach((e) => { champCounts[e.champion] = (champCounts[e.champion] || 0) + 1; });
+  const mostConsistent = Object.entries(champCounts).sort((a, b) => b[1] - a[1])[0];
 
   return (
-    <TweakRow label={label}>
-      <div ref={trackRef} role="radiogroup" onPointerDown={onPointerDown}
-           className={dragging ? 'twk-seg dragging' : 'twk-seg'}>
-        <div className="twk-seg-thumb"
-             style={{ left: `calc(2px + ${idx} * (100% - 4px) / ${n})`,
-                      width: `calc((100% - 4px) / ${n})` }} />
-        {opts.map((o) => (
-          <button key={o.value} type="button" role="radio" aria-checked={o.value === value}>
-            {o.label}
+    <div className="tk">
+      {/* header */}
+      <section className="pm-card tk-hero">
+        <div className="tk-hero-l">
+          <div className="pm-card-eyebrow">Strategy Tracker · risk-model portfolios</div>
+          <div className="tk-hero-title">Three risk models, tracked daily</div>
+          <p className="tk-hero-sub">The same Strategy Lab signals run under three postures — <strong>Conservative</strong>, <strong>Balanced</strong> and <strong>Aggressive</strong> — each proposing a conviction-weighted set of trades. Hit <strong>Record</strong> to log today's proposals with entry prices; the daily feed then marks them to market, so every snapshot shows its <strong>realized return since</strong>. Over time the journal reveals which posture actually works, and the leader becomes your <strong>champion</strong>.</p>
+        </div>
+        <div className="tk-hero-r">
+          <button className={`tk-record${flash ? " flashed" : ""}`} onClick={() => recordSnapshot(false)} style={{ background: accent }}>
+            {flash ? "✓ Recorded" : "Re-record now"}
           </button>
+          <span className="tk-record-note">Auto-recorded daily · {journal.length} snapshot{journal.length === 1 ? "" : "s"} logged · <button className="tk-seed" onClick={seedHistory}>seed demo history</button></span>
+        </div>
+      </section>
+
+      {/* all three model portfolios — champion highlighted */}
+      <div className="tk-cards">
+        {runs.map((r, i) => (
+          <section className={`pm-card tk-card${i === 0 ? " is-champ" : ""}`} key={r.model.id} style={i === 0 ? { borderColor: r.model.color } : {}}>
+            <div className="tk-card-top">
+              <span className="tk-dot" style={{ background: r.model.color }} />
+              <span className="tk-card-name">{r.model.name}</span>
+              {i === 0 && <span className="tk-card-badge" style={{ background: r.model.color }}>★ Champion</span>}
+            </div>
+            <div className="tk-card-ret" style={{ color: r.ret >= 0 ? tUP : tDOWN }}>{tPct(r.ret)}</div>
+            <div className="tk-card-grid">
+              <div><span>vs S&P</span><strong style={{ color: r.va >= 0 ? tUP : tDOWN }}>{tPct(r.va)}</strong></div>
+              <div><span>Sharpe</span><strong>{r.sharpe.toFixed(2)}</strong></div>
+              <div><span>Max DD</span><strong style={{ color: tDOWN }}>{r.mdd.toFixed(1)}%</strong></div>
+              <div><span>Hit rate</span><strong>{r.hitRate.toFixed(0)}%</strong></div>
+            </div>
+            <div className="tk-card-blurb">{r.model.blurb}</div>
+            <div className="tk-card-picks">{r.picks.slice(0, 5).map((p) => p.h.ticker).join(" · ")}</div>
+          </section>
         ))}
       </div>
-    </TweakRow>
-  );
-}
 
-function TweakSelect({ label, value, options, onChange }) {
-  return (
-    <TweakRow label={label}>
-      <select className="twk-field" value={value} onChange={(e) => onChange(e.target.value)}>
-        {options.map((o) => {
-          const v = typeof o === 'object' ? o.value : o;
-          const l = typeof o === 'object' ? o.label : o;
-          return <option key={v} value={v}>{l}</option>;
-        })}
-      </select>
-    </TweakRow>
-  );
-}
+      {/* CONSOLIDATED PROPOSED BOOKS — all propositions, with $ amounts + account routing */}
+      <section className="pm-card tk-books">
+        <style>{TK_BOOKS_CSS}</style>
+        <div className="pm-card-head">
+          <div>
+            <div className="pm-card-eyebrow">Proposed books · deploy your capital</div>
+            <div className="tk-books-sub">Each model reallocates your <strong>{tMoney(equity)}</strong> net liquidity into a full position list — every line shows the <strong>dollar amount</strong> and the <strong>account</strong> to hold it in. Switch models to compare postures.</div>
+          </div>
+          <div className="tk-books-tabs">
+            {runs.map((r) => {
+              const id = r.model.id, on = (bookId || runs[0].model.id) === id;
+              return <button key={id} className={on ? "on" : ""} onClick={() => setBookId(id)} style={on ? { background: r.model.color, borderColor: r.model.color, color: "#fff" } : {}}>{r.model.name}</button>;
+            })}
+          </div>
+        </div>
+        {(() => {
+          const r = runs.find((x) => x.model.id === (bookId || runs[0].model.id)) || runs[0];
+          const built = window.helmConstruct ? window.helmConstruct(r.picks.map((p) => ({ ticker: p.h.ticker, sector: p.h.sector, score: (p.h.sig ? p.h.sig.composite : 0) || Math.round((p.w || 0.05) * 800), h: p.h })), { maxName: r.model.id === "aggressive" ? 0.18 : r.model.id === "conservative" ? 0.09 : 0.12, maxSector: r.model.id === "aggressive" ? 0.40 : 0.30 }) : null;
+          const wmap = {};
+          if (built) built.weights.forEach((b) => { wmap[b.ticker] = b.w; });
+          const rows = r.picks.map((p) => { const w = built && wmap[p.h.ticker] != null ? wmap[p.h.ticker] : (p.w || 0); const acct = p.h.acct || routeForNewPick(p.h, D.accounts || []); return { t: p.h.ticker, sec: p.h.sector, w: w * 100, amt: w * equity, acct, px: p.h.price, ccy: p.h.ccy, h0: p.h, isNew: !p.h.acct }; }).sort((a, b) => b.w - a.w);
+          const div = built ? built.div : null;
+          const byAcct = {};
+          rows.forEach((x) => { byAcct[x.acct] = (byAcct[x.acct] || 0) + x.amt; });
+          return (
+            <>
+              {div && (
+                <div className="tk-div" title="Portfolio construction: correlation/sector-aware sizing">
+                  <span className="tk-div-tag" style={{ background: div.score >= 65 ? "#0e9f6e" : div.score >= 45 ? "#d97706" : "#e02424" }}>Diversification {div.score}/100</span>
+                  <span className="tk-div-txt">{div.effNames} effective names across {div.sectors} sectors · largest sector <strong>{div.topSector} {div.topSectorW}%</strong>. {div.feasible ? `Weights are correlation- & sector-capped (≤${div.capName}% name, ≤${div.capSector}% sector) so the book is balanced, not just each pick.` : `Caps (≤${div.capName}% name, ≤${div.capSector}% sector) can't be met with so few names — weights fall back to equal-weight, so concentration stays high. Add more names to diversify.`}</span>
+                </div>
+              )}
+              <div className="tk-books-summary">
+                {Object.entries(byAcct).sort((a, b) => b[1] - a[1]).map(([id, amt]) => (
+                  <div className="tk-acct-chip" key={id} title={acctLabel(id)}>
+                    <span className="tk-acct-name">{acctName(id)}</span>
+                    <span className="tk-acct-amt mono">{tMoney(amt)}</span>
+                    <span className="tk-acct-pct mono">{(amt / equity * 100).toFixed(0)}%</span>
+                  </div>
+                ))}
+              </div>
+              <div className="pm-table-wrap">
+                <table className="pm-table tk-book-table">
+                  <thead><tr>
+                    <th className="ta-left">#</th><th className="ta-left">Position</th>
+                    <th className="ta-left">Target weight</th><th className="ta-right">Amount ({dispCcy})</th>
+                    <th className="ta-left">Horizon</th><th className="ta-left">Hold in account</th><th className="ta-center">Action</th>
+                  </tr></thead>
+                  <tbody>
+                    {rows.map((x, i) => (
+                      <tr key={x.t}>
+                        <td className="ta-left tk-rank">{i + 1}</td>
+                        <td className="ta-left"><strong>{x.t}</strong> <span className="tk-book-sec">{x.sec}</span>{x.isNew && <span className="tk-new-tag" title="Not currently in your book — proposed from the broader universe">new</span>}</td>
+                        <td className="ta-left"><div className="tk-wrow"><div className="tk-wbar-wrap"><div className="tk-wbar" style={{ width: Math.min(100, x.w) + "%", background: r.model.color }} /></div><span className="mono tk-wpct">{x.w.toFixed(1)}%</span></div></td>
+                        <td className="ta-right mono">{tMoney(x.amt)}</td>
+                        <td className="ta-left">{(() => { const sg = window.signalsFor ? window.signalsFor(x.h0 || { ticker: x.t, price: x.px, sector: x.sec, divYield: 0, spark: [100, 103, 106, 108, 111] }, window.helmPresetCfg ? window.helmPresetCfg(r.model.id) : undefined) : null; const th = sg && window.helmTradeHorizon ? window.helmTradeHorizon(sg) : null; return th ? <span className="tk-hz" title={th.note} style={{ color: th.kind === "core" ? "#0a7d57" : th.kind === "quick" ? "#b45309" : "var(--ink-2)" }}>{th.tag}</span> : <span className="tk-hz">—</span>; })()}</td>
+                        <td className="ta-left"><span className="tk-acct-tag">{acctName(x.acct)}</span></td>
+                        <td className="ta-center">{window.TradeButton ? <window.TradeButton label="Log buy" ticker={x.t} side="buy" amount={x.amt} acctHint={x.acct} source="Tracker proposed book" small /> : <span className="tk-buy">Buy</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="tk-foot-note">Conviction-scaled weights · posture: {r.model.blurb.toLowerCase()} Account routing follows where each name sits today (registered REER/CELI shelter gains; crypto in the crypto sleeve). Total deploys 100% of your {tMoney(equity)}. Framework proposal — validate against your Plan budget before trading.</div>
+            </>
+          );
+        })()}
+      </section>
 
-function TweakText({ label, value, placeholder, onChange }) {
-  return (
-    <TweakRow label={label}>
-      <input className="twk-field" type="text" value={value} placeholder={placeholder}
-             onChange={(e) => onChange(e.target.value)} />
-    </TweakRow>
-  );
-}
+      {/* equity curves */}
+      <section className="pm-card">
+        <div className="pm-card-head">
+          <div className="pm-card-eyebrow">Paper-portfolio equity curves · 120 days</div>
+          <div className="tk-legend">
+            {runs.map((r) => (<span key={r.model.id}><i style={{ background: r.model.color }} />{r.model.name}</span>))}
+            <span className="tk-mut"><i className="dash dash-actual" />Your actual portfolio</span>
+            <span className="tk-mut"><i className="dash" />S&P 500</span>
+          </div>
+        </div>
+        <div className="tk-chart" style={{ color: "var(--ink)" }}><TrackChart runs={runs} accent={accent} actual={actualCurve} /></div>
+      </section>
 
-function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) {
-  const clamp = (n) => {
-    if (min != null && n < min) return min;
-    if (max != null && n > max) return max;
-    return n;
-  };
-  const startRef = React.useRef({ x: 0, val: 0 });
-  const onScrubStart = (e) => {
-    e.preventDefault();
-    startRef.current = { x: e.clientX, val: value };
-    const decimals = (String(step).split('.')[1] || '').length;
-    const move = (ev) => {
-      const dx = ev.clientX - startRef.current.x;
-      const raw = startRef.current.val + dx * step;
-      const snapped = Math.round(raw / step) * step;
-      onChange(clamp(Number(snapped.toFixed(decimals))));
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  };
-  return (
-    <div className="twk-num">
-      <span className="twk-num-lbl" onPointerDown={onScrubStart}>{label}</span>
-      <input type="number" value={value} min={min} max={max} step={step}
-             onChange={(e) => onChange(clamp(Number(e.target.value)))} />
-      {unit && <span className="twk-num-unit">{unit}</span>}
+      {window.ReadinessBanner ? <window.ReadinessBanner label="before trading the champion's picks" /> : null}
+
+      {/* leaderboard */}
+      <section className="pm-card">
+        <div className="pm-card-eyebrow">Model leaderboard</div>
+        <div className="pm-table-wrap">
+          <table className="pm-table tk-table">
+            <thead><tr>
+              <th className="ta-left">#</th><th className="ta-left">Model</th>
+              <th className="ta-right">Return</th><th className="ta-right">vs S&P</th>
+              <th className="ta-right">Sharpe</th><th className="ta-right">Max DD</th>
+              <th className="ta-right">Hit rate</th><th className="ta-left">Top picks</th>
+            </tr></thead>
+            <tbody>
+              {runs.map((r, i) => (
+                <tr key={r.model.id} className={i === 0 ? "tk-leader" : ""}>
+                  <td className="ta-left tk-rank">{i + 1}</td>
+                  <td className="ta-left">
+                    <span className="tk-dot" style={{ background: r.model.color }} />
+                    <strong>{r.model.name}</strong>
+                  </td>
+                  <td className="ta-right mono" style={{ color: r.ret >= 0 ? tUP : tDOWN }}>{tPct(r.ret)}</td>
+                  <td className="ta-right mono" style={{ color: r.va >= 0 ? tUP : tDOWN }}>{tPct(r.va)}</td>
+                  <td className="ta-right mono">{r.sharpe.toFixed(2)}</td>
+                  <td className="ta-right mono" style={{ color: tDOWN }}>{r.mdd.toFixed(1)}%</td>
+                  <td className="ta-right mono">{r.hitRate.toFixed(0)}%</td>
+                  <td className="ta-left tk-picks">{r.picks.slice(0, 4).map((p) => p.h.ticker).join(" · ")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* journal */}
+      <section className="pm-card">
+        <div className="pm-card-head">
+          <div className="pm-card-eyebrow">Tracking journal</div>
+          {journal.length > 0 && <button className="pm-link" style={{ color: "var(--muted)" }} onClick={clearJournal}>Clear</button>}
+        </div>
+        {mostConsistent && (
+          <div className="tk-consistent">Most consistent champion so far: <strong>{mostConsistent[0]}</strong> ({mostConsistent[1]} of {journal.length} snapshots)</div>
+        )}
+        {journal.length === 0 ? (
+          <div className="tk-empty">Recording today's signals automatically… re-visit on different days (or after the live feed updates prices) to build the track record across all three models.</div>
+        ) : (
+          <div className="tk-journal">
+            {journal.map((e) => (
+              <div className="tk-jrow" key={e.date}>
+                <span className="tk-jdate mono">{e.date}</span>
+                <span className="tk-jchamp" style={{ color: accent }}>★ {e.champion}</span>
+                <span className="tk-jtop">top pick {e.topPick}</span>
+                {(() => {
+                  const r = realizedSince(e);
+                  return r
+                    ? <span className="tk-jreal mono" style={{ color: r.ret >= 0 ? tUP : tDOWN }} title={`${r.n} proposed picks marked to current feed price`}>{tPct(r.ret)} since</span>
+                    : <span className="tk-jreal tk-mut">— since</span>;
+                })()}
+                <span className="tk-jrets">{e.models.slice(0, 3).map((m) => (
+                  <span key={m.id} className="mono" style={{ color: m.ret >= 0 ? tUP : tDOWN }}>{m.name.split(" ")[0]} {tPct(m.ret, 0)}</span>
+                ))}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {journal.length >= 5 && window.RiskPanel && (() => {
+          // daily returns per model from the journal (each entry has model.ret as % return that day)
+          const champRets = journal.map((e) => { const m = e.models ? e.models.find((x) => x.name === e.champion) : null; return m ? m.ret / 100 : 0; }).filter((r) => r !== 0);
+          return (
+            <div style={{ marginTop: 18 }}>
+              <div className="pm-card-eyebrow">Risk statistics · champion model ({champ.model.name})</div>
+              {React.createElement(window.RiskPanel, { rets: champRets, label: champ.model.name, accent })}
+            </div>
+          );
+        })()}
+        <div className="tk-foot-note">Paper-trading simulation on deterministic forward paths — a framework to compare models, not a live trading record. With the data feed connected, each recorded snapshot captures the real prices of that day, so the journal becomes a genuine walk-forward test set the models can be tuned against.</div>
+      </section>
     </div>
   );
 }
 
-// Relative-luminance contrast pick — checkmarks drawn over a swatch need to
-// read on both #111 and #fafafa without per-option configuration. Hex input
-// only (#rgb / #rrggbb); named or rgb()/hsl() colors fall through to "light".
-function __twkIsLight(hex) {
-  const h = String(hex).replace('#', '');
-  const x = h.length === 3 ? h.replace(/./g, (c) => c + c) : h.padEnd(6, '0');
-  const n = parseInt(x.slice(0, 6), 16);
-  if (Number.isNaN(n)) return true;
-  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-  return r * 299 + g * 587 + b * 114 > 148000;
-}
+const TK_BOOKS_CSS = `
+.tk-books-sub { font-size: 13px; color: var(--ink-2); line-height: 1.55; max-width: 640px; }
+.tk-books-tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; flex: none; }
+.tk-books-tabs button { font: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 14px; border: 0; border-right: 1px solid var(--line); background: var(--panel-2); color: var(--ink-2); cursor: pointer; }
+.tk-books-tabs button:last-child { border-right: 0; }
+.tk-books-summary { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 4px; }
+.tk-acct-chip { display: flex; align-items: baseline; gap: 8px; border: 1px solid var(--line); border-radius: 9px; padding: 8px 13px; background: var(--panel-2); }
+.tk-acct-name { font-size: 12px; font-weight: 600; color: var(--ink); }
+.tk-acct-amt { font-size: 13px; font-weight: 700; }
+.tk-acct-pct { font-size: 11px; color: var(--muted); }
+.tk-book-table td { padding: 9px 12px; vertical-align: middle; }
+.tk-book-sec { font-size: 11px; color: var(--muted); margin-left: 4px; }
+.tk-new-tag { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #0a7d57; background: #0e9f6e1a; padding: 1px 5px; border-radius: 4px; margin-left: 6px; }
+.tk-wrow { display: flex; align-items: center; gap: 9px; }
+.tk-wbar-wrap { width: 90px; height: 7px; background: var(--line-2); border-radius: 4px; overflow: hidden; flex: none; }
+.tk-wbar { height: 100%; border-radius: 4px; }
+.tk-wpct { font-size: 12px; min-width: 42px; }
+.tk-acct-tag { font-size: 11.5px; font-weight: 600; color: var(--ink-2); background: var(--panel-2); border: 1px solid var(--line); padding: 2px 9px; border-radius: 6px; }
+.tk-hz { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; }
+.tk-div { display: flex; align-items: center; gap: 12px; margin: 14px 0 2px; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); flex-wrap: wrap; }
+.tk-div-tag { color: #fff; font-family: var(--mono); font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 99px; white-space: nowrap; }
+.tk-div-txt { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; }
+.tk-div-txt strong { color: var(--ink); }
+.tk-buy { font-size: 11px; font-weight: 700; color: #0e9f6e; background: color-mix(in srgb, #0e9f6e 12%, transparent); padding: 3px 11px; border-radius: 99px; }
+@media (max-width: 760px) { .tk-books-tabs { width: 100%; } .tk-books-tabs button { flex: 1; } }
+`;
 
-const __TwkCheck = ({ light }) => (
-  <svg viewBox="0 0 14 14" aria-hidden="true">
-    <path d="M3 7.2 5.8 10 11 4.2" fill="none" strokeWidth="2.2"
-          strokeLinecap="round" strokeLinejoin="round"
-          stroke={light ? 'rgba(0,0,0,.78)' : '#fff'} />
-  </svg>
-);
-
-// TweakColor — curated color/palette picker. Each option is either a single
-// hex string or an array of 1-5 hex strings; the card adapts — a lone color
-// renders solid, a palette renders colors[0] as the hero (left ~2/3) with the
-// rest stacked in a sharp column on the right. onChange emits the
-// option in the shape it was passed (string stays string, array stays array).
-// Without options it falls back to the native color input for back-compat.
-function TweakColor({ label, value, options, onChange }) {
-  if (!options || !options.length) {
-    return (
-      <div className="twk-row twk-row-h">
-        <div className="twk-lbl"><span>{label}</span></div>
-        <input type="color" className="twk-swatch" value={value}
-               onChange={(e) => onChange(e.target.value)} />
-      </div>
-    );
-  }
-  // Native <input type=color> emits lowercase hex per the HTML spec, so
-  // compare case-insensitively. String() guards JSON.stringify(undefined),
-  // which returns the primitive undefined (no .toLowerCase).
-  const key = (o) => String(JSON.stringify(o)).toLowerCase();
-  const cur = key(value);
-  return (
-    <TweakRow label={label}>
-      <div className="twk-chips" role="radiogroup">
-        {options.map((o, i) => {
-          const colors = Array.isArray(o) ? o : [o];
-          const [hero, ...rest] = colors;
-          const sup = rest.slice(0, 4);
-          const on = key(o) === cur;
-          return (
-            <button key={i} type="button" className="twk-chip" role="radio"
-                    aria-checked={on} data-on={on ? '1' : '0'}
-                    aria-label={colors.join(', ')} title={colors.join(' · ')}
-                    style={{ background: hero }}
-                    onClick={() => onChange(o)}>
-              {sup.length > 0 && (
-                <span>
-                  {sup.map((c, j) => <i key={j} style={{ background: c }} />)}
-                </span>
-              )}
-              {on && <__TwkCheck light={__twkIsLight(hero)} />}
-            </button>
-          );
-        })}
-      </div>
-    </TweakRow>
-  );
-}
-
-function TweakButton({ label, onClick, secondary = false }) {
-  return (
-    <button type="button" className={secondary ? 'twk-btn secondary' : 'twk-btn'}
-            onClick={onClick}>{label}</button>
-  );
-}
-
-Object.assign(window, {
-  useTweaks, TweaksPanel, TweakSection, TweakRow,
-  TweakSlider, TweakToggle, TweakRadio, TweakSelect,
-  TweakText, TweakNumber, TweakColor, TweakButton,
-});
+window.StrategyTracker = StrategyTracker;

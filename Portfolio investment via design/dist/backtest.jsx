@@ -1,132 +1,820 @@
-# Helm — Data Feed Architecture (free-tier design)
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Helm — Portfolio Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --accent: #0e9f6e;
+    --ui: "IBM Plex Sans", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    --bg: #f4f6f8;
+    --panel: #ffffff;
+    --panel-2: #fbfcfd;
+    --ink: #121820;
+    --ink-2: #475063;
+    --muted: #818b99;
+    --line: #e8ebef;
+    --line-2: #f0f2f5;
+    --radius: 14px;
+    --pad: 20px;
+    --kpi-gap: 16px;
+    --fs-base: 14px;
+    --fs-stat: 27px;
+    --row-pad: 13px;
+  }
+  [data-density="compact"] { --pad: 15px; --kpi-gap: 12px; --fs-base: 13px; --fs-stat: 24px; --row-pad: 9px; }
+  [data-density="comfy"]   { --pad: 26px; --kpi-gap: 20px; --fs-base: 15px; --fs-stat: 31px; --row-pad: 17px; }
 
-**Design principle:** the strategy is swing-horizon (1 week to several months), so **one
-end-of-day (EOD) refresh per day is enough**. No intraday, no streaming. That single fact
-keeps every data source inside its free quota and lets us avoid running a paid server.
+  html, body { height: 100%; background: var(--bg); }
+  body {
+    font-family: var(--ui);
+    background: var(--bg);
+    color: var(--ink);
+    font-size: var(--fs-base);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  #root { height: 100vh; background: var(--bg); }
+  /* kill the default black backdrop when the page is taken fullscreen */
+  :fullscreen, :fullscreen #root, :-webkit-full-screen, :-webkit-full-screen #root { background: var(--bg); }
+  .pm-app { display: flex; height: 100vh; min-width: 1100px; background: var(--bg); }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .pm-muted { color: var(--muted); }
 
----
+  /* ---------- Sidebar ---------- */
+  .pm-side {
+    width: 236px; flex: none; background: var(--panel);
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; padding: 18px 14px;
+  }
+  .pm-brand { display: flex; align-items: center; gap: 11px; padding: 6px 8px 18px; }
+  .pm-brand-mark { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; box-shadow: 0 4px 12px -3px color-mix(in srgb, var(--accent) 55%, transparent); }
+  .pm-brand-name { font-weight: 700; font-size: 17px; letter-spacing: -0.02em; }
+  .pm-brand-sub { font-size: 11px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-top: -1px; }
+  .pm-nav { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+  .pm-nav-group { display: flex; flex-direction: column; gap: 2px; }
+  .pm-nav-group + .pm-nav-group { margin-top: 12px; }
+  .pm-nav-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; padding: 0 11px 4px; }
+  .pm-nav-item {
+    display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: 9px;
+    border: 0; background: transparent; color: var(--ink-2); font: inherit; font-weight: 500;
+    cursor: pointer; text-align: left; transition: background .12s, color .12s;
+  }
+  .pm-nav-item svg { color: var(--muted); transition: color .12s; }
+  .pm-nav-item:hover { background: var(--line-2); color: var(--ink); }
+  .pm-nav-item.is-active { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-weight: 600; }
+  .pm-nav-item.is-active svg { color: var(--accent); }
+  .pm-side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 12px; }
+  .pm-pace-chip { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .pm-pace-chip-top { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); align-items: baseline; }
+  .pm-pace-chip-top strong { font-family: var(--mono); font-size: 15px; }
+  .pm-pace-bar { height: 5px; border-radius: 99px; background: var(--line); margin: 8px 0 6px; overflow: hidden; }
+  .pm-pace-bar > div { height: 100%; border-radius: 99px; transition: width .4s; }
+  .pm-pace-chip-foot { font-size: 11px; color: var(--muted); }
+  .pm-user { display: flex; align-items: center; gap: 10px; padding: 4px 6px; }
+  .pm-avatar { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg, #334155, #0f172a); color: #fff; font-size: 12px; font-weight: 600; display: grid; place-items: center; }
+  .pm-user-name { font-weight: 600; font-size: 13px; }
+  .pm-user-sub { font-size: 11px; color: var(--muted); }
 
-## The core architectural decision: precompute → static JSON → static front-end
+  /* ---------- Main ---------- */
+  .pm-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .pm-top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 26px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .pm-top-l { display: flex; align-items: center; gap: 18px; }
+  .pm-top-title { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
 
-A browser prototype can't call these APIs directly (CORS + exposed API keys + rate limits).
-So we split into two halves:
+  /* ---------- Account selector ---------- */
+  .pm-acct { position: relative; }
+  .pm-acct-btn { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 6px 10px 6px 6px; cursor: pointer; font: inherit; color: var(--ink); transition: border-color .15s, box-shadow .15s; }
+  .pm-acct-btn:hover, .pm-acct-btn.is-open { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+  .pm-acct-btn > svg { color: var(--muted); }
+  .pm-acct-ico { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; font-family: var(--mono); font-weight: 600; font-size: 11px; letter-spacing: -0.02em; flex: none; }
+  .pm-acct-ico.sm { width: 30px; height: 30px; font-size: 10px; }
+  .pm-acct-text { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
+  .pm-acct-name { font-weight: 700; font-size: 14px; letter-spacing: -0.01em; }
+  .pm-acct-label { font-size: 11px; color: var(--muted); }
+  .pm-acct-menu { position: absolute; top: calc(100% + 8px); left: 0; z-index: 40; width: 268px; background: var(--panel); border: 1px solid var(--line); border-radius: 13px; box-shadow: 0 18px 44px -14px rgba(15,23,42,.28); padding: 7px; }
+  .pm-acct-menu-label { font-size: 10.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 9px 7px; }
+  .pm-acct-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 9px; border: 0; background: transparent; border-radius: 9px; cursor: pointer; font: inherit; color: var(--ink); text-align: left; }
+  .pm-acct-opt:hover { background: var(--line-2); }
+  .pm-acct-opt.is-active { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+  .pm-acct-opt > svg { margin-left: auto; }
+  .pm-mkt { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
+  .pm-mkt-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); animation: pulse 2s infinite; }
+  .pm-mkt.closed { color: var(--muted); }
+  .pm-mkt.closed .pm-mkt-dot { background: var(--muted); animation: none; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent); } 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  .pm-mkt-time { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+  .pm-feed { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 99px; padding: 3px 10px; }
+  .pm-feed-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+  .pm-feed.is-live { color: #0e7a52; background: color-mix(in srgb, #0e9f6e 10%, transparent); border-color: color-mix(in srgb, #0e9f6e 30%, transparent); }
+  .pm-feed.is-live .pm-feed-dot { background: #0e9f6e; animation: pulse 2s infinite; }
+  .pm-feed.is-close { color: var(--ink-2); background: color-mix(in srgb, #d97706 9%, transparent); border-color: color-mix(in srgb, #d97706 26%, transparent); }
+  .pm-feed.is-close .pm-feed-dot { background: #d97706; }
+  .pm-top-r { display: flex; align-items: center; gap: 10px; }
+  .pm-search { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 11px; width: 290px; color: var(--muted); transition: border-color .15s, box-shadow .15s; }
+  .pm-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+  .pm-search input { border: 0; background: transparent; font: inherit; color: var(--ink); flex: 1; outline: none; }
+  .pm-search kbd { font-family: var(--mono); font-size: 11px; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; color: var(--muted); }
+  .pm-icon-btn { position: relative; width: 38px; height: 38px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); display: grid; place-items: center; cursor: pointer; }
+  .pm-icon-btn:hover { background: var(--bg); }
+  .pm-badge-dot { position: absolute; top: 9px; right: 10px; width: 6px; height: 6px; border-radius: 50%; background: #e02424; }
+  .pm-btn-primary { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 0 16px; height: 38px; font: inherit; font-weight: 600; cursor: pointer; box-shadow: 0 4px 12px -3px color-mix(in srgb, var(--accent) 50%, transparent); }
+  .pm-btn-primary:hover { filter: brightness(1.05); }
+  .pm-ccy-toggle { display: flex; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
+  .pm-ccy-toggle button { font: inherit; font-size: 12px; font-weight: 700; color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 6px 11px; cursor: pointer; letter-spacing: 0.02em; }
+  .pm-ccy-toggle button:hover { color: var(--ink); }
+  .pm-ccy-toggle button.is-active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 
-```
-   ┌─────────────────────────────────────────────┐
-   │  INGESTION JOB (runs once daily, after close) │   ← the only "backend"
-   │  GitHub Action  (free)  OR  small cron box     │
-   │   1. pull from free APIs                       │
-   │   2. normalize + cache in SQLite               │
-   │   3. compute snapshots                         │
-   │   4. write static JSON files                   │
-   └───────────────────────┬───────────────────────┘
-                            │  commits / uploads JSON
-                            ▼
-   ┌─────────────────────────────────────────────┐
-   │  STATIC JSON SNAPSHOTS  (in repo / CDN / S3)   │
-   │  prices.json  macro.json  news.json  fx.json   │
-   └───────────────────────┬───────────────────────┘
-                            │  fetch() — same-origin or CORS-open
-                            ▼
-   ┌─────────────────────────────────────────────┐
-   │  HELM front-end (this HTML app)                │
-   │  reads JSON; RSI / returns / backtest /        │
-   │  signals all already compute client-side       │
-   └─────────────────────────────────────────────┘
-```
+  .pm-scroll { flex: 1; overflow-y: auto; padding: 22px 26px 40px; }
 
-**Why a GitHub Action is the sweet spot:** it's free, runs on a daily `cron`, has secrets
-storage for API keys (keys never reach the browser), and commits JSON back to the repo.
-GitHub Pages/raw then serves the JSON to the front-end with no server to run or pay for.
-(Prompt 2's `macro_dashboard.py` is the seed of this job — fix its fetches and point it here.)
+  /* ---------- KPI ---------- */
+  .pm-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--kpi-gap); margin-bottom: var(--kpi-gap); }
+  .pm-stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); }
+  .pm-stat-label { font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: 0.02em; }
+  .pm-stat-value { font-family: var(--mono); font-size: var(--fs-stat); font-weight: 600; letter-spacing: -0.02em; margin: 9px 0 6px; }
+  .pm-stat-foot { font-size: 12.5px; }
+  .pm-stat-delta { font-weight: 600; font-family: var(--mono); }
 
----
+  /* ---------- Cards / cols ---------- */
+  .pm-cols { display: grid; grid-template-columns: minmax(0,1fr) 348px; gap: var(--kpi-gap); align-items: start; }
+  .pm-col-main, .pm-col-rail { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .pm-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); }
+  .pm-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .pm-card-eyebrow { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+  .pm-count { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .pm-doclink { display: flex; align-items: center; gap: 13px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); text-decoration: none; color: var(--ink); transition: border-color .15s, background .15s; }
+  .pm-doclink:hover { border-color: var(--ink-2); background: var(--panel-2); }
+  .pm-doclink-ico { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; font-size: 19px; flex: none; }
+  .pm-doclink span:nth-child(2) { display: flex; flex-direction: column; gap: 2px; }
+  .pm-doclink strong { font-size: 14px; font-weight: 600; }
+  .pm-doclink em { font-style: normal; font-size: 12px; color: var(--muted); }
+  .pm-doclink-arrow { margin-left: auto; font-size: 16px; color: var(--muted); }
+  .pm-link { border: 0; background: transparent; font: inherit; font-weight: 600; cursor: pointer; font-size: 12.5px; }
 
-## What each module needs → which free source
+  /* ---------- Performance ---------- */
+  .pm-perf-val { font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin-top: 4px; }
+  .pm-perf-sub { display: flex; align-items: baseline; gap: 7px; font-size: 13px; margin-top: 3px; }
+  .pm-perf-sub .pm-vs { margin-left: 4px; font-weight: 600; font-size: 12px; }
+  .pm-perf-ctrl { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+  .pm-baseline { display: flex; align-items: center; gap: 9px; }
+  .pm-baseline-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .pm-bench { display: flex; align-items: center; gap: 6px; font: inherit; font-size: 12px; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; cursor: pointer; }
+  .pm-bench.is-on { color: var(--ink); border-color: var(--ink-2); }
+  .pm-bench-swatch { width: 14px; height: 0; border-top: 2px dashed currentColor; }
+  .pm-range { display: flex; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
+  .pm-range button { font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  .pm-range button:hover { color: var(--ink); }
+  .pm-range button.is-active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .pm-chart-area { margin-top: 16px; color: var(--ink); }
+  .pm-chart-tip { background: var(--ink); color: #fff; border-radius: 8px; padding: 7px 10px; pointer-events: none; box-shadow: 0 6px 20px -6px rgba(0,0,0,.4); }
+  .pm-chart-tip-val { font-family: var(--mono); font-weight: 600; font-size: 14px; }
+  .pm-chart-tip-sub { font-size: 11px; opacity: .75; margin-top: 1px; }
 
-| Module | Data needed | Free source (primary → fallback) |
-|---|---|---|
-| Holdings / Dashboard / Crypto | your positions | **NBDB CSV export** or statement upload (no public API — stays manual) |
-| | EOD quotes (stocks/ETF, US + TSX `.TO`) | **Stooq** EOD CSV (no key, bulk) → **Twelve Data** (free key, 800/day) |
-| | crypto prices | **CoinGecko** (free, generous) |
-| | USD/CAD FX | **Bank of Canada Valet** (official CAD) → **Frankfurter**/ECB |
-| Research | 5y daily OHLC | **Stooq** bulk EOD → **Yahoo chart API** → Twelve Data `time_series` |
-| | fundamentals (P/E, beta, yield) | **Finnhub** (60/min) → **FMP** (250/day) |
-| | company news | **Finnhub** company-news → RSS / **Marketaux** (free tier) |
-| Performance / Rendement | returns + flows | computed locally from price history + your **transaction log** (NBDB export) |
-| Backtest | 5y daily history per asset | **Stooq** (best free bulk EOD) |
-| Projections | long-term return assumptions | static **NBC CIO PMLT** (4.8% balanced / 5.5% equity / 3.7% FI) + risk-free from FRED/BoC |
-| Strategy Lab | RSI / momentum | computed locally from history |
-| | valuation / quality | **Finnhub** / **FMP** fundamentals |
-| Macro module | rates, CPI, yield curve, unemployment | **FRED** (St-Louis Fed, free key — DGS10, DGS2, CPIAUCSL, UNRATE) |
-| | Canadian rates / CPI | **Bank of Canada Valet** (free, official) |
-| | **global liquidity** (Raoul Pal proxy) | **FRED**: Fed balance sheet `WALCL` − reverse repo `RRPONTSYD` − TGA `WTREGEN`; add ECB/BOJ/PBOC for global |
-| | commodities (oil, gold, copper) | **FRED** (`DCOILWTICO`, gold) → Stooq futures |
-| | geopolitical / news events | **GDELT Project** (free global events+tone API) + RSS |
-| | economist-persona analysis | LLM over the fetched headlines (precompute in the job, store as text) |
+  /* ---------- Risk panel ---------- */
+  .risk-panel { margin-top: 14px; }
+  .risk-compact { margin-top: 8px; }
+  .risk-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  @media (max-width: 700px) { .risk-grid { grid-template-columns: repeat(2, 1fr); } }
+  .risk-stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; }
+  .risk-stat-label { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; color: var(--muted); text-transform: uppercase; }
+  .risk-stat-val { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
+  .risk-stat-sub { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
+  .risk-mdd-head { font-size: 11.5px; font-weight: 600; color: var(--muted); margin: 14px 0 6px; }
+  .risk-hist-wrap { display: flex; flex-direction: column; gap: 6px; }
+  .risk-hist-legend { display: flex; gap: 16px; font-size: 11.5px; color: var(--ink-2); }
+  .risk-hist-legend strong { font-variant-numeric: tabular-nums; }
+  .risk-foot { font-size: 10.5px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+  .risk-empty { font-size: 12px; color: var(--muted); padding: 12px 0; }
+  .pm-table-wrap { margin-top: 12px; overflow-x: auto; }
+  .pm-acctsum { margin-bottom: 18px; }
+  .pm-acctsum-lbl { font-size: 11px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+  .pm-acctsum-table td { padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .pm-acctsum-total td { border-top: 2px solid var(--line); border-bottom: 0; font-weight: 700; }
+  .pm-acctsum-table .ta-right { text-align: right; }
+  .pm-acctsum-table .ta-left { text-align: left; }
+  .pm-table { width: 100%; border-collapse: collapse; }
+  .pm-table th { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 12px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .pm-table th.sortable { cursor: pointer; user-select: none; }
+  .pm-table th.sortable:hover { color: var(--ink); }
+  .pm-table th.sorted { color: var(--accent); }
+  .pm-table td { padding: var(--row-pad) 12px; border-bottom: 1px solid var(--line-2); font-size: 13px; vertical-align: middle; }
+  .pm-table tbody tr:last-child td, .pm-table tr:last-child td { border-bottom: 0; }
+  .pm-table tbody tr:hover { background: var(--panel-2); }
+  .ta-left { text-align: left; } .ta-right { text-align: right; } .ta-center { text-align: center; }
+  .pm-sym { display: flex; align-items: center; gap: 11px; }
+  .pm-sym-badge { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; font-family: var(--mono); font-weight: 600; font-size: 12px; flex: none; }
+  .pm-sym-tkr { font-weight: 700; font-size: 13.5px; letter-spacing: -0.01em; }
+  .pm-sym-name { font-size: 11.5px; color: var(--muted); }
+  .pm-spk { display: flex; justify-content: center; }
+  .pm-cell-sub { font-size: 11px; margin-top: 1px; }
+  .pm-weight { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+  .pm-weight-bar { width: 44px; height: 5px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .pm-weight-bar i { display: block; height: 100%; border-radius: 99px; }
+  .pm-empty { text-align: center; color: var(--muted); padding: 30px; }
 
----
+  /* ---------- Target ---------- */
+  .pm-target { color: var(--ink); text-align: center; }
+  .pm-target .pm-card-eyebrow { text-align: left; }
+  .pm-target svg { margin: 8px 0 2px; }
+  .pm-target-num { font-family: var(--mono); font-size: 34px; font-weight: 600; letter-spacing: -0.02em; margin-top: -14px; }
+  .pm-target-cap { font-size: 12px; color: var(--muted); }
+  .pm-target-pill { display: inline-block; margin-top: 12px; font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 99px; }
+  .pm-target-pill.good { background: color-mix(in srgb, #0e9f6e 13%, transparent); color: #0e9f6e; }
+  .pm-target-pill.warn { background: color-mix(in srgb, #d97706 14%, transparent); color: #b45309; }
 
-## Recommended free stack (minimum keys, maximum coverage)
-1. **Stooq** — EOD prices & 5y history, US + TSX, **no API key**, CSV bulk. The workhorse.
-2. **CoinGecko** — crypto, no key.
-3. **Bank of Canada Valet** — official CAD FX + rates, no key.
-4. **FRED** — all US macro + the liquidity proxy (one free key).
-5. **Finnhub** — fundamentals + company news (one free key, 60/min).
-6. **GDELT** — geopolitical/news events, no key.
+  /* ---------- Allocation ---------- */
+  .pm-alloc { display: flex; align-items: center; gap: 16px; margin-top: 14px; }
+  .pm-donut-center { font-family: var(--mono); font-weight: 600; font-size: 15px; fill: var(--ink); }
+  .pm-donut-sub { font-size: 9.5px; fill: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .pm-legend { list-style: none; flex: 1; display: flex; flex-direction: column; gap: 7px; }
+  .pm-legend li { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+  .pm-legend-dot { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+  .pm-legend-name { color: var(--ink-2); }
+  .pm-legend-pct { margin-left: auto; font-weight: 600; }
 
-Six sources, **two API keys** (FRED + Finnhub), both stored as GitHub Action secrets.
+  /* ---------- Movers ---------- */
+  .pm-mover-grp-label { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 6px; }
+  .pm-mover { display: flex; align-items: center; gap: 9px; padding: 6px 0; }
+  .pm-mover-tkr { font-weight: 700; font-size: 13px; width: 52px; }
+  .pm-mover-name { font-size: 12px; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pm-mover-pct { font-weight: 600; font-size: 13px; }
 
----
+  /* ---------- Watchlist ---------- */
+  .pm-watch { margin-top: 10px; display: flex; flex-direction: column; }
+  .pm-watch-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line-2); }
+  .pm-watch-row:last-child { border-bottom: 0; }
+  .pm-watch-l { width: 92px; }
+  .pm-watch-tkr { font-weight: 700; font-size: 13px; }
+  .pm-watch-name { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pm-watch-r { width: 78px; text-align: right; }
+  .pm-watch-px { font-size: 13px; font-weight: 500; }
+  .pm-watch-ch { font-size: 11.5px; font-weight: 600; }
 
-## Liquidity model (the Raoul Pal "global liquidity" proxy), from FRED
-`Net Fed Liquidity = WALCL (Fed balance sheet) − RRPONTSYD (reverse repo) − WTREGEN (Treasury General Account)`
-For *global* liquidity, add major central-bank balance sheets (ECB, BOJ, PBOC) converted to USD.
-Plot vs S&P 500 — the lead/lag is the signal. All series are free on FRED (ECB/BOJ via their own portals or FRED proxies).
+  /* scrollbar */
+  .pm-scroll::-webkit-scrollbar { width: 10px; }
+  .pm-scroll::-webkit-scrollbar-thumb { background: #d4d9e0; border-radius: 99px; border: 3px solid var(--bg); }
 
----
+  /* ---------- Rendement view ---------- */
+  .rd-wrap { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .rd-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .rd-tabs { display: flex; gap: 4px; background: var(--bg); border: 1px solid var(--line); border-radius: 11px; padding: 4px; }
+  .rd-tabs button { font: inherit; font-weight: 600; font-size: 14px; color: var(--muted); background: transparent; border: 0; border-radius: 8px; padding: 8px 18px; cursor: pointer; }
+  .rd-tabs button:hover { color: var(--ink); }
+  .rd-tabs button.is-active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 4px rgba(0,0,0,.09); }
+  .rd-frame { display: flex; align-items: center; gap: 9px; }
+  .rd-frame-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .rd-headline { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-top: 20px; flex-wrap: wrap; }
+  .rd-eyebrow { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; }
+  .rd-big { font-family: var(--mono); font-size: 40px; font-weight: 600; letter-spacing: -0.02em; margin: 4px 0 2px; }
+  .rd-sub { font-size: 13px; color: var(--ink-2); }
+  .rd-mode { align-self: flex-end; }
+  .rd-chart { margin-top: 18px; color: var(--ink); }
+  .rd-bar-val { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+  .rd-axis { font-size: 12px; fill: var(--muted); font-weight: 500; }
+  .rd-table td, .rd-table th { white-space: nowrap; }
+  .rd-note { font-size: 12px; color: var(--muted); margin-top: 14px; line-height: 1.5; max-width: 760px; }
+  .rd-vs { font-weight: 600; }
+  .rd-bench-row { display: flex; align-items: center; gap: 8px; }
+  .rd-select { font: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink-2); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; cursor: pointer; }
+  .rd-csv { display: flex; align-items: center; gap: 6px; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; cursor: pointer; }
+  .rd-csv:hover { background: var(--bg); border-color: var(--ink-2); }
+  .rd-score-src { font-size: 11px; color: var(--muted); }
+  .rd-score-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 11px; overflow: hidden; margin-top: 14px; }
+  .rd-metric { background: var(--panel); padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .rd-metric span { font-size: 11.5px; color: var(--muted); }
+  .rd-metric strong { font-family: var(--mono); font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .rd-metric em { font-style: normal; font-size: 11px; color: var(--muted); }
+  .rd-score-note { font-size: 12px; color: var(--ink-2); line-height: 1.55; margin-top: 14px; max-width: 820px; }
 
-## Storage schema (SQLite — fixes Prompt 2's design)
-- `positions(account, ticker, qty, avg_cost, ccy, updated_at)`  ← from NBDB export
-- `prices(ticker, date, close, volume)`  ← EOD, primary key (ticker, date)
-- `fundamentals(ticker, pe, beta, div_yield, fetched_at)`
-- `macro(series_id, date, value)`  ← FRED/BoC series, long format
-- `news(id, ticker_or_topic, headline, url, source, published_at)`
-- `ai_analyses(id, run_at, kind, input_digest, analysis_text)`  ← link to macro/news by run_at
-Fix vs Prompt 2: real FRED endpoint `fredgraph.csv?id=SERIES`, RSS/Finnhub for news (not HTML `<title>` scraping), FK by run_at.
+  /* ---------- Holdings page ---------- */
+  .hp { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .hp-summary { display: grid; grid-template-columns: repeat(6, 1fr); gap: var(--kpi-gap); }
+  .hp-sum-item { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: flex; flex-direction: column; gap: 5px; }
+  .hp-sum-item span { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  .hp-sum-item strong { font-family: var(--mono); font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  .hp-sum-item strong em { font-style: normal; font-size: 12px; font-weight: 500; opacity: .85; margin-left: 2px; }
+  .hp-search { display: flex; align-items: center; gap: 7px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px; color: var(--muted); width: 220px; }
+  .hp-search input { border: 0; background: transparent; font: inherit; font-size: 13px; color: var(--ink); flex: 1; outline: none; }
+  .hp-row { cursor: pointer; }
+  .hp-acct-tag { font-size: 11.5px; font-weight: 600; color: var(--ink-2); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
 
----
+  /* ---------- Research page ---------- */
+  .rp { display: flex; flex-direction: column; gap: 14px; }
+  .rp-back { align-self: flex-start; display: flex; align-items: center; gap: 5px; font: inherit; font-weight: 600; font-size: 13px; color: var(--ink-2); background: transparent; border: 0; cursor: pointer; padding: 4px 2px; }
+  .rp-back:hover { color: var(--accent); }
+  .rp-grid { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: var(--kpi-gap); align-items: start; }
+  .rp-rail { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .rp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .pm-sym-badge.lg { width: 46px; height: 46px; border-radius: 12px; font-size: 15px; }
+  .rp-tkr { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .rp-ccy { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; vertical-align: middle; margin-left: 4px; }
+  .rp-name { font-size: 13.5px; color: var(--muted); margin-top: 1px; }
+  .rp-px { text-align: right; }
+  .rp-px-val { font-family: var(--mono); font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+  .rp-px-ch { font-size: 13px; font-weight: 600; }
+  .rp-range { display: inline-flex; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; margin: 16px 0 4px; }
+  .rp-range button { font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  .rp-range button:hover { color: var(--ink); }
+  .rp-range button.is-active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .rp-chart { margin-top: 8px; color: var(--ink); }
+  .rp-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 11px; overflow: hidden; margin-top: 16px; }
+  .rp-stat { background: var(--panel); padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }
+  .rp-stat span { font-size: 11.5px; color: var(--muted); }
+  .rp-stat strong { font-size: 14px; font-weight: 600; }
+  .rp-pos { margin-top: 12px; }
+  .rp-pos-big { font-family: var(--mono); font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+  .rp-pos-sub { font-size: 13px; font-weight: 600; margin-top: 2px; }
+  .rp-pos-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; margin-top: 16px; }
+  .rp-pos-grid > div, .rp-pos-accts > div { display: flex; flex-direction: column; gap: 2px; }
+  .rp-pos-grid span, .rp-pos-accts span { font-size: 11.5px; color: var(--muted); }
+  .rp-pos-grid strong { font-family: var(--mono); font-size: 14px; font-weight: 600; }
+  .rp-pos-accts { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-2); }
+  .rp-pos-accts > div { flex-direction: row; justify-content: space-between; align-items: center; }
+  .rp-pos-accts strong { font-family: var(--mono); font-size: 13px; }
+  .rp-pos-actions { display: flex; gap: 8px; margin-top: 18px; }
+  .rp-sell { font: inherit; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 10px; height: 38px; cursor: pointer; }
+  .rp-sell:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .rp-nopos { margin-top: 12px; }
+  .rp-nopos p { font-size: 13px; color: var(--ink-2); margin-bottom: 12px; }
+  .rp-news { display: flex; flex-direction: column; margin-top: 8px; }
+  .rp-news-item { display: block; padding: 11px 0; border-bottom: 1px solid var(--line-2); cursor: pointer; }
+  .rp-news-item:last-child { border-bottom: 0; }
+  .rp-news-item:hover .rp-news-h { color: var(--accent); }
+  .rp-news-h { font-size: 13px; font-weight: 600; line-height: 1.35; text-wrap: pretty; }
+  .rp-news-t { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 
-## Data contract the front-end reads (what the job emits)
-```jsonc
-// prices.json      { "NVDA": [{ "d":"2026-06-19", "c":142.62 }, ...], ... }
-// quotes.json      { "NVDA": { "last":142.62, "chgPct":3.41, "asOf":"..." }, ... }
-// fundamentals.json{ "NVDA": { "pe":..., "beta":..., "divYield":... }, ... }
-// fx.json          { "USDCAD":1.4174, "asOf":"..." }
-// macro.json       { "DGS10":[...], "netLiquidity":[...], "CPIAUCSL":[...] }
-// news.json        [{ "ticker":"NVDA", "headline":"...", "url":"...", "ts":"..." }]
-// cio.json         { "asOf":"2026-06", "stance":"OW equities", "tilts":{...}, "forecasts":{...} }
-```
-The front-end already computes RSI, returns, the backtest, and signals — it just swaps mock
-generators for `fetch('prices.json')` etc. Minimal change to Helm.
+  /* ---------- AI chart analysis ---------- */
+  .an-card { }
+  .an-sub { font-size: 12.5px; color: var(--ink-2); margin-top: 3px; }
+  .an-hz { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  .an-hz-label { font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .an-hz-seg { display: inline-flex; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
+  .an-hz-seg button { font: inherit; font-size: 12px; font-weight: 600; color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  .an-hz-seg button:hover { color: var(--ink); }
+  .an-hz-seg button.is-active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .an-hz-desc { font-size: 11.5px; color: var(--muted); }
+  .an-btn { font: inherit; font-weight: 600; font-size: 13px; color: #fff; border: 0; border-radius: 10px; padding: 9px 16px; cursor: pointer; transition: filter .15s; white-space: nowrap; }
+  .an-btn:hover { filter: brightness(1.06); }
+  .an-btn:disabled { opacity: 0.6; cursor: default; }
+  .an-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 4px; }
+  .an-chip { font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--ink-2); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 4px 10px; }
+  .an-hint { font-size: 12.5px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
+  .an-loading { font-size: 13px; color: var(--ink-2); margin-top: 14px; }
+  .an-loading::after { content: ""; }
+  .an-out { margin-top: 14px; border-top: 1px solid var(--line-2); padding-top: 14px; }
+  .an-line { font-size: 13px; color: var(--ink-2); line-height: 1.55; margin-bottom: 7px; text-wrap: pretty; }
+  .an-key { font-weight: 700; color: var(--ink); font-size: 11px; letter-spacing: 0.03em; }
 
----
+  /* ---------- Crypto view ---------- */
+  .cv { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .cv-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .cv-eyebrow { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; }
+  .cv-total { font-family: var(--mono); font-size: 38px; font-weight: 600; letter-spacing: -0.02em; margin: 4px 0 8px; }
+  .cv-hero-sub { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .cv-pill { font-size: 12.5px; font-weight: 600; padding: 4px 10px; border-radius: 99px; }
+  .cv-allpill { font-size: 13px; font-weight: 600; }
+  .cv-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--kpi-gap); }
+  .cv-stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); display: flex; flex-direction: column; gap: 5px; }
+  .cv-stat span { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .cv-stat strong { font-family: var(--mono); font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+  .cv-stat em { font-style: normal; font-size: 12px; font-weight: 600; }
+  .cv-mut { color: var(--muted) !important; font-weight: 500 !important; }
+  .cv-chart-val { font-family: var(--mono); font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin-top: 2px; }
+  .cv-chart { margin-top: 14px; }
+  .cv-cols { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: var(--kpi-gap); align-items: start; }
+  .cv-rail { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .cv-coins { display: flex; flex-direction: column; margin-top: 8px; }
+  .cv-coin { display: flex; align-items: center; gap: 13px; padding: 13px 8px; border-bottom: 1px solid var(--line-2); cursor: pointer; border-radius: 9px; transition: background .12s; }
+  .cv-coin:hover { background: var(--panel-2); }
+  .cv-coin:last-child { border-bottom: 0; }
+  .cv-coin-logo { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 12px; flex: none; }
+  .cv-coin-id { flex: 1; min-width: 0; }
+  .cv-coin-name { font-weight: 700; font-size: 14px; }
+  .cv-coin-sub { font-size: 11.5px; color: var(--muted); }
+  .cv-coin-spark { flex: none; }
+  .cv-coin-val { text-align: right; width: 100px; }
+  .cv-coin-mv { font-size: 14px; font-weight: 600; }
+  .cv-coin-pl { font-size: 12px; font-weight: 600; }
+  .cv-alloc { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+  .cv-perf-row { display: flex; align-items: center; gap: 9px; padding: 9px 0; font-size: 13.5px; }
+  .cv-perf-row:not(:last-child) { border-bottom: 1px solid var(--line-2); }
+  .cv-perf-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 6px; }
+  .cv-perf-tag.good { background: color-mix(in srgb, #0e9f6e 14%, transparent); color: #0e9f6e; }
+  .cv-perf-tag.bad { background: color-mix(in srgb, #e02424 12%, transparent); color: #e02424; }
+  .cv-side { font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 6px; }
+  .cv-side.buy { background: color-mix(in srgb, #0e9f6e 13%, transparent); color: #0e9f6e; }
+  .cv-side.sell { background: color-mix(in srgb, #e02424 11%, transparent); color: #c81e1e; }
+  .cv-tx-asset { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+  .cv-tx-dot { width: 9px; height: 9px; border-radius: 50%; }
+  .cv-legend-tkr { font-size: 10px; color: var(--muted); font-weight: 500; margin-left: 3px; }
 
-## Cadence & cost — two-speed feed
-**Fast lane — quotes only, every 1 min (market hours):** `feed/quotes-worker.js` on a
-**Cloudflare Worker** (free tier, 1-min cron, 100k req/day) + Workers KV. Polls Finnhub
-(US real-time, 60/min) + CoinGecko (crypto, 24/7) and serves `quotes.json` (CORS-open).
-The front-end polls it once a minute. *Note:* Stooq is EOD-only and free Canadian/TSX
-intraday doesn't exist — TSX names stay at the daily close. Minute data improves the live
-**view**, not the swing **signals** (which are 1wk–months by design).
+  /* ---------- Projections ---------- */
+  .pj { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .pj-top { display: grid; grid-template-columns: minmax(0,1fr) 380px; gap: var(--kpi-gap); align-items: stretch; }
+  .pj-hero { display: flex; flex-direction: column; }
+  .pj-big { font-family: var(--mono); font-size: 46px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 4px; }
+  .pj-hero-sub { font-size: 13.5px; color: var(--ink-2); }
+  .pj-hero-sub strong { color: var(--ink); }
+  .pj-breakdown { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 20px; margin-top: auto; padding-top: 20px; }
+  .pj-breakdown > div { display: flex; flex-direction: column; gap: 3px; }
+  .pj-breakdown span { font-size: 11.5px; color: var(--muted); }
+  .pj-breakdown strong { font-family: var(--mono); font-size: 16px; font-weight: 600; }
+  .pj-controls { display: flex; flex-direction: column; gap: 18px; }
+  .pj-ctrl { display: flex; flex-direction: column; gap: 8px; }
+  .pj-ctrl-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--ink-2); font-weight: 500; }
+  .pj-ctrl-head strong { font-family: var(--mono); font-size: 16px; color: var(--ink); }
+  .pj-ctrl input[type=range] { width: 100%; height: 5px; cursor: pointer; }
+  .pj-ctrl-scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+  .pj-mark { font-weight: 600; }
+  .pj-range { align-self: flex-start; }
+  .pj-legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-2); }
+  .pj-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .pj-legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+  .pj-mut { color: var(--muted); }
+  .pj-chart { margin-top: 14px; }
+  .pj-ytick { font-size: 11px; fill: var(--muted); font-family: var(--mono); }
+  .pj-xtick { font-size: 11px; fill: var(--muted); }
+  .pj-xtick.strong { fill: var(--ink-2); font-weight: 600; }
+  .pj-yaxis-label { font-size: 11px; fill: var(--muted); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+  .pj-bottom { display: grid; grid-template-columns: minmax(0,1fr) 380px; gap: var(--kpi-gap); align-items: start; }
+  .pj-miles { display: flex; flex-direction: column; margin-top: 12px; }
+  .pj-mile { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--line-2); position: relative; }
+  .pj-mile:last-child { border-bottom: 0; }
+  .pj-mile-dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid; flex: none; }
+  .pj-mile-val { font-family: var(--mono); font-weight: 600; font-size: 16px; width: 80px; }
+  .pj-mile-when { font-size: 13px; color: var(--ink-2); }
+  .pj-mile.done .pj-mile-when { color: var(--accent); font-weight: 600; }
+  .pj-goal { display: flex; flex-direction: column; }
+  .pj-goal-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 14px; font-weight: 600; }
+  .pj-goal-result { display: flex; flex-direction: column; gap: 16px; margin-top: 18px; }
+  .pj-goal-result > div { display: flex; flex-direction: column; gap: 3px; }
+  .pj-goal-result span { font-size: 12px; color: var(--muted); }
+  .pj-goal-result strong { font-family: var(--mono); font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .pj-goal-result em { font-style: normal; font-size: 12px; color: var(--ink-2); }
 
-**Slow lane — everything else, once daily:** `feed/ingest.py` on a **GitHub Action**
-(history, fundamentals, macro, liquidity model, news). None of these change intraday.
+  /* ---------- Backtest ---------- */
+  .bt { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .bt-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .bt-sub { font-size: 13px; color: var(--ink-2); margin-top: 4px; max-width: 560px; line-height: 1.45; }
+  .bt-assets { display: flex; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; flex: none; flex-wrap: wrap; max-width: 460px; justify-content: flex-end; }
+  .bt-assets button { font: inherit; font-size: 12.5px; font-weight: 700; color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 6px 13px; cursor: pointer; }
+  .bt-assets button:hover { color: var(--ink); }
+  .bt-assets button.is-active { background: var(--panel); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .bt-scorebar { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr; gap: var(--kpi-gap); }
+  .bt-score, .bt-mini { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px var(--pad); }
+  .bt-score { display: flex; align-items: center; gap: 14px; }
+  .bt-score-ring { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; flex: none; }
+  .bt-score-ring::after { content: ""; position: absolute; width: 42px; height: 42px; background: var(--panel); border-radius: 50%; }
+  .bt-score-ring span { position: relative; z-index: 1; font-family: var(--mono); font-weight: 700; font-size: 18px; }
+  .bt-score-label { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  .bt-score-verdict { font-size: 15px; font-weight: 700; margin-top: 2px; }
+  .bt-mini { display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+  .bt-mini span { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  .bt-mini strong { font-family: var(--mono); font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .bt-legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--ink-2); flex-wrap: wrap; }
+  .bt-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .bt-legend i { width: 14px; height: 0; display: inline-block; }
+  .bt-legend i.solid { border-top: 2px solid var(--ink); opacity: .85; }
+  .bt-legend i.solid.muted { border-top-color: var(--muted); opacity: .55; }
+  .bt-legend i.dash { border-top: 2px dashed; }
+  .bt-legend i.band { height: 9px; border-radius: 2px; opacity: .2; }
+  .bt-chart { margin-top: 14px; }
+  .bt-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .bt-axis-split { color: var(--ink-2); font-weight: 600; }
+  .bt-readout { display: grid; grid-template-columns: minmax(0,1.4fr) 1fr; gap: var(--kpi-gap); align-items: start; }
+  .bt-read-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 20px; margin-top: 12px; }
+  .bt-read-grid > div { display: flex; flex-direction: column; gap: 3px; }
+  .bt-read-grid span { font-size: 11.5px; color: var(--muted); }
+  .bt-read-grid strong { font-family: var(--mono); font-size: 19px; font-weight: 600; }
+  .bt-note { font-size: 12px; color: var(--ink-2); line-height: 1.55; margin-top: 16px; }
+  .bt-verdict-card p { font-size: 13px; color: var(--ink-2); line-height: 1.5; margin-top: 10px; }
+  .bt-verdict-big { font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin-top: 10px; }
 
-- GitHub Actions cron is 5-min-minimum and throttled → can't be the minute clock; the Worker is.
-- Cost: still **$0** — both within free tiers. Two API keys (FRED + Finnhub) as secrets.
-- The only manual step: refreshing **positions** from NBDB (CSV export or statement upload).
+  /* ---------- Strategy Lab ---------- */
+  .sl { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .sl-macro { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+  .sl-macro-l { flex: 1; }
+  .sl-posture { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; margin: 4px 0 8px; }
+  .sl-macro-txt { font-size: 13.5px; color: var(--ink-2); line-height: 1.55; max-width: 620px; }
+  .sl-macro-txt strong { color: var(--ink); }
+  .sl-risk { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; flex: none; }
+  .sl-risk-toprow { display: flex; align-items: center; gap: 12px; }
+  .sl-cfg-btn { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-2); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+  .sl-cfg-btn:hover { border-color: var(--ink-2); color: var(--ink); }
+  .sl-cfg-btn.is-on { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+  .sl-cfg { padding-top: var(--pad); }
+  .sl-cfg-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .sl-cfg-col { display: flex; flex-direction: column; gap: 13px; }
+  .sl-cfg-title { font-size: 12px; font-weight: 700; color: var(--ink); text-transform: uppercase; letter-spacing: 0.04em; display: flex; justify-content: space-between; align-items: baseline; }
+  .sl-cfg-title span { font-family: var(--mono); font-weight: 500; color: var(--muted); text-transform: none; letter-spacing: 0; font-size: 11px; }
+  .sl-cfg-row { display: flex; flex-direction: column; gap: 6px; }
+  .sl-cfg-rowhead { display: flex; justify-content: space-between; align-items: baseline; font-size: 12.5px; color: var(--ink-2); }
+  .sl-cfg-rowhead strong { font-family: var(--mono); font-size: 13px; color: var(--ink); }
+  .sl-cfg-row input[type=range] { width: 100%; height: 4px; cursor: pointer; }
+  .sl-cfg-reset { margin-top: 4px; align-self: flex-start; font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-2); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+  .sl-cfg-reset:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+  .sl-tax-na { margin-top: 8px; }
+  .sl-tax-na-big { font-family: var(--mono); font-size: 26px; font-weight: 600; color: var(--muted); letter-spacing: -0.01em; }
+  .sl-tax-na p { font-size: 12px; color: var(--ink-2); line-height: 1.55; margin-top: 8px; }
+  .sl-risk-label { font-size: 11.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .sl-risk-note { font-size: 11.5px; color: var(--muted); }
+  .sl-cols { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: var(--kpi-gap); align-items: start; }
+  .sl-rail { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .sl-trades { display: flex; flex-direction: column; margin-top: 8px; }
+  .sl-trade { display: flex; align-items: center; gap: 12px; padding: 13px 4px; border-bottom: 1px solid var(--line-2); }
+  .sl-trade:last-child { border-bottom: 0; }
+  .sl-trade-act { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 4px 9px; border-radius: 7px; width: 46px; text-align: center; flex: none; }
+  .sl-trade-act.buy { background: color-mix(in srgb, #0e9f6e 14%, transparent); color: #0e9f6e; }
+  .sl-trade-act.sell { background: color-mix(in srgb, #e02424 12%, transparent); color: #c81e1e; }
+  .sl-trade-act.exit { background: color-mix(in srgb, #e02424 14%, transparent); color: #c81e1e; }
+  .sl-trade-act.trim { background: color-mix(in srgb, #d97706 16%, transparent); color: #b45309; }
+  .sl-trade-acct { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .sl-fund-live { font-size: 9.5px; font-weight: 700; color: #0e9f6e; background: color-mix(in srgb, #0e9f6e 12%, transparent); padding: 1px 6px; border-radius: 99px; margin-left: 5px; vertical-align: middle; letter-spacing: 0.02em; }
+  .sl-nbc { font-size: 9.5px; font-weight: 700; color: #b45309; background: color-mix(in srgb, #d97706 14%, transparent); padding: 1px 6px; border-radius: 99px; margin-left: 5px; vertical-align: middle; letter-spacing: 0.02em; }
+  .sl-trade-act.hold { background: color-mix(in srgb, #d97706 14%, transparent); color: #b45309; }
+  .pm-sym-badge.sl-badge { width: 30px; height: 30px; font-size: 11px; }
+  .sl-trade-id { flex: 1; min-width: 0; }
+  .sl-trade-tkr { font-weight: 700; font-size: 13.5px; }
+  .sl-trade-name { font-weight: 500; font-size: 11.5px; color: var(--muted); }
+  .sl-trade-why { font-size: 12px; color: var(--ink-2); margin-top: 2px; text-wrap: pretty; }
+  .sl-trade-nums { text-align: right; flex: none; }
+  .sl-trade-size { font-family: var(--mono); font-weight: 600; font-size: 14px; }
+  .sl-trade-sh { font-size: 11px; font-weight: 500; color: var(--muted); }
+  .sl-horizon { display: inline-block; margin-top: 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.02em; padding: 2px 8px; border-radius: 99px; text-transform: uppercase; }
+  .sl-hz-core { background: color-mix(in srgb, #0e9f6e 14%, transparent); color: #0a7d57; }
+  .sl-hz-build { background: color-mix(in srgb, #2563eb 12%, transparent); color: #1d4ed8; }
+  .sl-hz-tactical { background: color-mix(in srgb, #4f46e5 12%, transparent); color: #4338ca; }
+  .sl-hz-quick { background: color-mix(in srgb, #d97706 14%, transparent); color: #b45309; }
+  .sl-hz-watch { background: var(--line-2); color: var(--muted); }
+  .sl-trade-lv { display: flex; gap: 8px; font-family: var(--mono); font-size: 11px; font-weight: 600; margin-top: 2px; justify-content: flex-end; }
+  .sl-tax-big { font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin-top: 10px; }
+  .sl-tax-sub { font-size: 12px; color: var(--muted); }
+  .sl-tax-list { margin-top: 14px; display: flex; flex-direction: column; gap: 2px; }
+  .sl-tax-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; }
+  .sl-tax-row:last-child { border-bottom: 0; }
+  .sl-tax-tkr { font-weight: 600; }
+  .sl-tax-loss { font-family: var(--mono); font-weight: 600; }
+  .sl-tax-note { font-size: 11px; color: var(--muted); line-height: 1.5; margin-top: 12px; }
+  .sl-rb-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; }
+  .sl-rb-row:last-child { border-bottom: 0; }
+  .sl-rb-tkr { font-weight: 700; width: 56px; }
+  .sl-rb-w { font-family: var(--mono); color: var(--ink-2); }
+  .sl-rb-act { font-size: 12px; font-weight: 600; margin-left: auto; }
+  .sl-ok { font-size: 13px; color: var(--ink-2); margin-top: 10px; }
+  .sl-meter { width: 100%; max-width: 90px; height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .sl-meter i { display: block; height: 100%; border-radius: 99px; }
+  .sl-comp { font-family: var(--mono); font-weight: 700; font-size: 17px; }
+  .sl-act-tag { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 7px; }
+  .sl-act-tag.buy { background: color-mix(in srgb, #0e9f6e 14%, transparent); color: #0e9f6e; }
+  .sl-act-tag.sell { background: color-mix(in srgb, #e02424 12%, transparent); color: #c81e1e; }
+  .sl-act-tag.hold { background: var(--bg); color: var(--ink-2); }
+  .sl-sortseg, .sl-risk-seg { flex: none; }
+  .sl-foot-note { font-size: 11.5px; color: var(--muted); line-height: 1.55; margin-top: 14px; }
 
-### Why not minute everywhere
-Per-minute polling of history/fundamentals/macro burns free quotas for data that only
-changes once a day. Keep heavy data daily; spend the minute budget on quotes alone.
+  /* ---------- CIO macro panel ---------- */
+  .cio { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, var(--panel)), var(--panel)); }
+  .cio-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .cio-eyebrow { font-size: 11.5px; color: var(--muted); font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; }
+  .cio-src { text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .cio-regime { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; margin: 5px 0 3px; }
+  .cio-stance { font-size: 14px; font-weight: 700; }
+  .cio-stance-trend { font-size: 12px; font-weight: 700; margin-left: 10px; }
+  .cio-stance-why { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+  .cio-arrow { font-size: 11px; width: 12px; text-align: center; flex: none; }
+  .cio-arrow-flat { color: var(--line); }
+  .cio-toggle { font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-2); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; cursor: pointer; flex: none; }
+  .cio-toggle:hover { border-color: var(--ink-2); }
+  .cio-thesis { font-size: 13.5px; color: var(--ink-2); line-height: 1.6; margin: 14px 0 12px; max-width: 880px; text-wrap: pretty; }
+  .cio-risks { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cio-risk { font-size: 11.5px; font-weight: 600; color: #b45309; background: color-mix(in srgb, #d97706 12%, transparent); border-radius: 99px; padding: 4px 11px; }
+  .cio-detail { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 18px; }
+  .cio-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; }
+  .cio-group-title { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink); margin-bottom: 10px; }
+  .cio-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+  .cio-row-name { font-size: 12.5px; color: var(--ink-2); flex: 1; min-width: 0; }
+  .cio-scale { display: flex; gap: 2px; flex: none; }
+  .cio-cell { width: 9px; height: 14px; border-radius: 2px; background: var(--line); }
+  .cio-cell.mid { background: var(--line-2); }
+  .cio-row-lbl { font-size: 10.5px; font-weight: 600; width: 70px; text-align: right; flex: none; }
+  .cio-foot { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 28px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .cio-foot-title { font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 10px; }
+  .cio-expo { display: flex; align-items: center; gap: 12px; }
+  .cio-expo-bar { flex: 1; height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .cio-expo-bar i { display: block; height: 100%; border-radius: 99px; }
+  .cio-expo-val { font-family: var(--mono); font-size: 13px; font-weight: 600; flex: none; }
+  .cio-foot-note { font-size: 12px; color: var(--ink-2); line-height: 1.55; margin-top: 12px; }
+  .cio-returns-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px 16px; }
+  .cio-ret { display: flex; justify-content: space-between; font-size: 12.5px; padding: 3px 0; border-bottom: 1px solid var(--line-2); }
+  .cio-ret span { color: var(--ink-2); }
+  .cio-ret strong { font-family: var(--mono); font-weight: 600; }
+
+  /* ---------- Strategy Tracker ---------- */
+  .tk { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .tk-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+  .tk-hero-title { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; margin: 5px 0 8px; }
+  .tk-hero-sub { font-size: 13px; color: var(--ink-2); line-height: 1.55; max-width: 640px; text-wrap: pretty; }
+  .tk-hero-r { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: none; }
+  .tk-record { font: inherit; font-weight: 600; font-size: 13px; color: #fff; border: 0; border-radius: 10px; padding: 11px 18px; cursor: pointer; transition: filter .15s; white-space: nowrap; }
+  .tk-record:hover { filter: brightness(1.06); }
+  .tk-record.flashed { background: #0e9f6e !important; }
+  .tk-record-note { font-size: 11.5px; color: var(--muted); }
+  .tk-seed { font: inherit; font-size: 11.5px; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+  .tk-champ { position: relative; border-width: 2px; }
+  .tk-champ-badge { position: absolute; top: -1px; right: 18px; color: #fff; font-size: 11px; font-weight: 700; padding: 4px 11px; border-radius: 0 0 8px 8px; letter-spacing: 0.03em; }
+  .tk-champ-name { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .tk-champ-stats { display: grid; grid-template-columns: repeat(5, auto); gap: 28px; margin: 14px 0 10px; }
+  .tk-champ-stats > div { display: flex; flex-direction: column; gap: 3px; }
+  .tk-champ-stats span { font-size: 11.5px; color: var(--muted); }
+  .tk-champ-stats strong { font-family: var(--mono); font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .tk-champ-blurb { font-size: 12.5px; color: var(--ink-2); font-style: italic; }
+  .tk-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--kpi-gap); }
+  .tk-card { display: flex; flex-direction: column; }
+  .tk-card.is-champ { border-width: 2px; }
+  .tk-card-top { display: flex; align-items: center; gap: 8px; }
+  .tk-card-name { font-size: 15px; font-weight: 700; }
+  .tk-card-badge { color: #fff; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 99px; margin-left: auto; letter-spacing: 0.03em; }
+  .tk-card-ret { font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin: 8px 0 10px; }
+  .tk-card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+  .tk-card-grid > div { display: flex; justify-content: space-between; font-size: 12px; }
+  .tk-card-grid span { color: var(--muted); }
+  .tk-card-grid strong { font-family: var(--mono); font-weight: 600; }
+  .tk-card-blurb { font-size: 11.5px; color: var(--ink-2); font-style: italic; margin: 12px 0 8px; line-height: 1.45; }
+  .tk-card-picks { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: auto; padding-top: 8px; border-top: 1px solid var(--line-2); }
+  .tk-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11.5px; color: var(--ink-2); }
+  .tk-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .tk-legend i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+  .tk-legend i.dash { background: none !important; border-top: 2px dashed var(--muted); }
+  .tk-legend i.dash-actual { border-top-style: dashed; border-top-width: 2px; opacity: 0.85; }
+  .tk-mut { color: var(--muted); }
+  .tk-chart { margin-top: 14px; }
+  .tk-ytick { font-size: 11px; fill: var(--muted); font-family: var(--mono); }
+  .tk-table tbody tr.tk-leader { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .tk-rank { font-family: var(--mono); font-weight: 700; color: var(--muted); }
+  .tk-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+  .tk-picks { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+  .tk-consistent { font-size: 12.5px; color: var(--ink-2); margin: 4px 0 12px; }
+  .tk-empty { font-size: 13px; color: var(--ink-2); line-height: 1.55; margin-top: 10px; padding: 16px; background: var(--panel-2); border-radius: 10px; }
+  .tk-journal { display: flex; flex-direction: column; margin-top: 8px; }
+  .tk-jrow { display: grid; grid-template-columns: 88px 150px 1fr auto auto; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line-2); font-size: 12.5px; }
+  .tk-jrow:last-child { border-bottom: 0; }
+  .tk-jreal { font-weight: 600; font-size: 12px; text-align: right; }
+  .tk-jdate { color: var(--ink-2); }
+  .tk-jchamp { font-weight: 600; }
+  .tk-jtop { color: var(--muted); }
+  .tk-jrets { display: flex; gap: 12px; justify-content: flex-end; font-size: 11.5px; }
+  .tk-foot-note { font-size: 11.5px; color: var(--muted); line-height: 1.55; margin-top: 14px; }
+
+  /* ---------- Macro module ---------- */
+  .mc { display: flex; flex-direction: column; gap: var(--kpi-gap); }
+  .mc-read { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, var(--panel)), var(--panel)); }
+  .mc-posture { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin: 5px 0 8px; }
+  .mc-read-txt { font-size: 13px; color: var(--ink-2); line-height: 1.6; max-width: 640px; text-wrap: pretty; }
+  .mc-read-r { display: flex; flex-direction: column; gap: 12px; flex: none; }
+  .mc-read-stat { display: flex; flex-direction: column; gap: 3px; text-align: right; }
+  .mc-read-stat span { font-size: 11.5px; color: var(--muted); }
+  .mc-read-stat strong { font-size: 16px; font-weight: 700; }
+  .mc-liq-sub { font-size: 12.5px; color: var(--ink-2); margin-top: 3px; max-width: 560px; }
+  .mc-liq-val { font-family: var(--mono); font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .mc-liq-val span { font-size: 13px; }
+  .mc-m2-ctrl { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: none; }
+  .mc-m2-lagval { font-family: var(--mono); font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .mc-m2-lagval span { font-size: 12px; }
+  .mc-m2-seg { flex: none; }
+  .mc-legend2 { display: flex; gap: 16px; font-size: 12px; color: var(--ink-2); margin-top: 12px; }
+  .mc-legend2 span { display: inline-flex; align-items: center; gap: 6px; }
+  .mc-legend2 i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+  .mc-chart { margin-top: 14px; }
+  .mc-ytick { font-size: 10.5px; fill: var(--muted); font-family: var(--mono); }
+  .mc-foot-note { font-size: 11.5px; color: var(--muted); line-height: 1.55; margin-top: 14px; }
+  .mc-cols { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: var(--kpi-gap); align-items: start; }
+  .mc-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 11px; overflow: hidden; margin-top: 12px; }
+  .mc-ind { background: var(--panel); padding: 13px 15px; }
+  .mc-ind-curve { grid-column: span 2; }
+  .mc-ind-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .mc-ind-label { font-size: 12px; color: var(--ink-2); font-weight: 600; }
+  .mc-ind-chg { font-size: 11.5px; font-weight: 600; font-family: var(--mono); }
+  .mc-ind-val { font-family: var(--mono); font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 4px 0 8px; }
+  .mc-ind-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .mc-curve-read { font-size: 13px; font-weight: 700; margin-top: 6px; }
+  .mc-curve-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; margin-top: 4px; }
+  .mc-feed-card { align-self: stretch; }
+  .mc-feed { display: flex; flex-direction: column; margin-top: 8px; }
+  .mc-news { padding: 11px 0; border-bottom: 1px solid var(--line-2); }
+  .mc-news:last-child { border-bottom: 0; }
+  .mc-news-top { display: flex; justify-content: space-between; align-items: center; }
+  .mc-news-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+  .mc-news-tone { font-size: 11px; }
+  .mc-news-h { font-size: 13px; font-weight: 600; line-height: 1.4; margin: 4px 0 3px; text-wrap: pretty; }
+  .mc-news-src { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body style="background-color: rgba(38, 88, 88, 0)">
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="data.jsx"></script>
+<script src="realtrades.js"></script>
+<script src="transmission-graph.js"></script>
+<script src="engineconfig.js"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="charts.jsx"></script>
+<script type="text/babel" src="risk.jsx"></script>
+<script type="text/babel" src="rendement.jsx"></script>
+<script type="text/babel" src="pages.jsx"></script>
+<script type="text/babel" src="analysis.jsx"></script>
+<script type="text/babel" src="cryptoview.jsx"></script>
+<script type="text/babel" src="projections.jsx"></script>
+<script type="text/babel" src="backtest.jsx"></script>
+<script type="text/babel" src="strategy.jsx"></script>
+<script type="text/babel" src="tracker.jsx"></script>
+<script type="text/babel" src="macro.jsx"></script>
+<script type="text/babel" src="cioview.jsx"></script>
+<script type="text/babel" src="regime.jsx"></script>
+<script type="text/babel" src="plan.jsx"></script>
+<script type="text/babel" src="ips.jsx"></script>
+<script type="text/babel" src="spine.jsx"></script>
+<script type="text/babel" src="learning.jsx"></script>
+<script type="text/babel" src="reflexion.jsx"></script>
+<script type="text/babel" src="methods.jsx"></script>
+<script type="text/babel" src="screener.jsx"></script>
+<script type="text/babel" src="cockpit.jsx"></script>
+<script type="text/babel" src="sigma.jsx"></script>
+<script type="text/babel" src="odds.jsx"></script>
+<script type="text/babel" src="pulse.jsx"></script>
+<script type="text/babel" src="roundtable.jsx"></script>
+<script type="text/babel" src="chief.jsx"></script>
+<script type="text/babel" src="compound.jsx"></script>
+<script type="text/babel" src="transmission.jsx"></script>
+<script type="text/babel" src="bridge.jsx"></script>
+<script src="etf-universe.js"></script>
+<script src="nbc-research.js"></script>
+<script src="ciomix.jsx"></script>
+<script type="text/babel" src="papersim.jsx"></script>
+<script type="text/babel" src="readiness.jsx"></script>
+<script type="text/babel" src="learninglab.jsx"></script>
+<script type="text/babel" src="nightloop.jsx"></script>
+<script type="text/babel" src="intake.jsx"></script>
+<script type="text/babel" src="tradeui.jsx"></script>
+<script type="text/babel" src="tradehistory.jsx"></script>
+<script src="feed-config.js"></script>
+<script src="feed.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const ACCENTS = ["#0e9f6e", "#4f46e5", "#d97706", "#7c3aed"];
+const FONTS = {
+  Plex: '"IBM Plex Sans", system-ui, sans-serif',
+  Manrope: '"Manrope", system-ui, sans-serif',
+  Grotesk: '"Space Grotesk", system-ui, sans-serif',
+};
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "accent": "#7c3aed",
+  "font": "Grotesk",
+  "density": "compact"
+}/*EDITMODE-END*/;
+
+function Root() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (window.HelmFeed) window.HelmFeed.init(() => force((x) => x + 1));
+    return () => { if (window.HelmFeed && window.HelmFeed._timer) clearInterval(window.HelmFeed._timer); };
+  }, []);
+  const accent = t.accent || "#0e9f6e";
+  return (
+    <div className="pm-app" data-density={t.density}
+         style={{ "--accent": accent, "--ui": FONTS[t.font] || FONTS.Plex }}>
+      <Dashboard accent={accent} />
+      <TweaksPanel>
+        <TweakSection label="Theme" />
+        <TweakColor label="Accent" value={t.accent} options={ACCENTS}
+                    onChange={(v) => setTweak("accent", v)} />
+        <TweakRadio label="Font" value={t.font} options={["Plex", "Manrope", "Grotesk"]}
+                    onChange={(v) => setTweak("font", v)} />
+        <TweakSection label="Layout" />
+        <TweakRadio label="Density" value={t.density} options={["compact", "regular", "comfy"]}
+                    onChange={(v) => setTweak("density", v)} />
+      </TweaksPanel>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+</script>
+</body>
+</html>

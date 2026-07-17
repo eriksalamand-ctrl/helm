@@ -1,397 +1,271 @@
-// data.jsx — portfolio data modeled on real NBDB accounts (Eric Salamand)
-// All client-side, illustrative. Prices in each holding's native currency.
-(function () {
-  function mulberry32(a) {
-    return function () {
-      a |= 0; a = (a + 0x6D2B79F5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-  function series(seed, days, startVal, totalReturn, vol) {
-    // walk that lands near startVal*(1+totalReturn)
-    const rnd = mulberry32(seed);
-    const out = []; let v = startVal;
-    const drift = Math.pow(1 + totalReturn, 1 / days) - 1;
-    for (let i = 0; i < days; i++) { v = v * (1 + drift + (rnd() - 0.5) * 2 * vol); out.push(v); }
-    const end = out[out.length - 1], target = startVal * (1 + totalReturn);
-    for (let i = 0; i < out.length; i++) out[i] = out[i] * (target / end) ** (i / (out.length - 1)) ;
-    return out;
-  }
-  function spark(seed, n, up) {
-    const rnd = mulberry32(seed); const out = []; let v = 50;
-    for (let i = 0; i < n; i++) { v += (rnd() - (up ? 0.42 : 0.58)) * 6; out.push(v); }
-    return out;
-  }
-  // longer daily history for research charts (5y ≈ 1260d)
-  function priceHistory(seed, days, endPrice, totalReturn, vol) {
-    const s = series(seed, days, endPrice / (1 + totalReturn), totalReturn, vol);
-    return s;
-  }
+// cockpit.jsx — "Today": the Chief's morning brief. Leaner v2: the Chief's synthesis and the
+// day's proposed trades/readjustments get the space; macro & finance news sit beside them;
+// governance folds into a compact policy strip. Mode-aware (Minimal → risk/exits only).
+const { useState: useCkState } = React;
 
-  let FX = 1.4174; // USD -> CAD (mutable: live feed can update it)
-  const DAYS = 252;
-  const DONUT_COLORS = ["#0e9f6e", "#4f46e5", "#d97706", "#0ea5e9", "#e02424", "#7c3aed", "#0891b2", "#94a3b8"];
+const ckUP = "#0e9f6e", ckDN = "#e02424", ckWARN = "#d97706";
+const ckMoney = (n) => "$" + (Math.abs(n) >= 1000 ? n.toLocaleString("en-US", { maximumFractionDigits: 0 }) : n.toFixed(2));
+const ckSign = (n, dp = 1) => (n >= 0 ? "+" : "−") + Math.abs(n).toFixed(dp);
 
-  // ---- accounts (real NBDB structure) ----
-  const accounts = [
-    { id: "reer-cad", name: "REER",      ccy: "CAD", label: "CAD · Retirement",       cash: 50000, reg: true },
-    { id: "reer-usd", name: "REER USD",  ccy: "USD", label: "USD · Retirement",       cash: 0, reg: true },
-    { id: "celi-cad", name: "CELI",      ccy: "CAD", label: "CAD · Tax-free savings", cash: 23000, reg: true },
-    { id: "celi-usd", name: "CELI USD",  ccy: "USD", label: "USD · Tax-free savings", cash: 0, reg: true },
-    { id: "crypto-direct", name: "Crypto Direct", ccy: "USD", label: "USD · Direct coins (non-reg.)", cash: 0, reg: false },
-  ];
+function ckCfg(risk) {
+  return (window.helmPresetCfg || (() => ({ weights: { trend: 35, value: 20, reversion: 25, income: 20 }, buyBar: 62, sellBar: 40, rsiOver: 72, rsiUnder: 30, stopMult: 1, maxPos: 12 })))(risk);
+}
 
-  // ---- holdings (native ccy) — real NBDB statement positions, Jun 21 2026 ----
-  // day % (d) left at 0; the live feed overwrites it with real intraday moves.
-  const raw = [
-    // ===== CAD RRSP (reer-cad) =====
-    { t: "ETHH.B", n: "Purpose Ether CAD-Hgd", sec: "Crypto",        ccy: "CAD", q: 3558, avg: 10.31558, px: 8.09,  d: 0, acct: "reer-cad", seed: 11 },
-    { t: "SOLQ",   n: "3iQ Solana Staking ETF", sec: "Crypto",       ccy: "CAD", q: 3536, avg: 11.1159,  px: 7.95,  d: 0, acct: "reer-cad", seed: 12 },
-    { t: "ETHX.B", n: "CI Galaxy Ethereum",      sec: "Crypto",       ccy: "CAD", q: 3446, avg: 10.77494, px: 8.55,  d: 0, acct: "reer-cad", seed: 13 },
-    { t: "ETHY.B", n: "Purpose Ether CAD-Hgd",   sec: "Crypto",       ccy: "CAD", q: 2555, avg: 3.72515,  px: 1.65,  d: 0, acct: "reer-cad", seed: 14 },
-    { t: "COPR",   n: "Coppernico Metals",        sec: "Materials",    ccy: "CAD", q: 1600, avg: 0.495,    px: 0.370, d: 0, acct: "reer-cad", seed: 15 },
-    { t: "HCAL",   n: "Hamilton Enh Cdn Bank ETF",sec: "ETF",          ccy: "CAD", q: 361,  avg: 25.279,   px: 48.80, d: 0, acct: "reer-cad", seed: 16 },
-    { t: "URC",    n: "Uranium Royalty",          sec: "Materials",    ccy: "CAD", q: 200,  avg: 5.475,    px: 4.18,  d: 0, acct: "reer-cad", seed: 17 },
-    { t: "CSH.UN", n: "Chartwell Retirement",     sec: "Real Estate",  ccy: "CAD", q: 138,  avg: 17.01268, px: 21.58, d: 0, acct: "reer-cad", seed: 18 },
-    { t: "DND",    n: "Dye & Durham",             sec: "Software",     ccy: "CAD", q: 125,  avg: 6.986,    px: 1.82,  d: 0, acct: "reer-cad", seed: 19 },
-    { t: "VLE",    n: "Valeura Energy",           sec: "Energy",       ccy: "CAD", q: 120,  avg: 4.32317,  px: 11.16, d: 0, acct: "reer-cad", seed: 20 },
-    { t: "THX",    n: "Thor Explorations",        sec: "Materials",    ccy: "CAD", q: 119,  avg: 1.42076,  px: 1.16,  d: 0, acct: "reer-cad", seed: 21 },
-    { t: "BTCY.B", n: "Purpose Bitcoin CAD-Hgd",  sec: "Crypto",       ccy: "CAD", q: 100,  avg: 5.03,     px: 5.36,  d: 0, acct: "reer-cad", seed: 22 },
-    { t: "DHT.UN", n: "DRI Healthcare Trust",     sec: "Healthcare",   ccy: "CAD", q: 98,   avg: 11.88061, px: 17.96, d: 0, acct: "reer-cad", seed: 23 },
-    { t: "AP.UN",  n: "Allied Properties REIT",   sec: "Real Estate",  ccy: "CAD", q: 89,   avg: 16.1718,  px: 10.22, d: 0, acct: "reer-cad", seed: 24 },
-    { t: "LSPD",   n: "Lightspeed Commerce",      sec: "Software",     ccy: "CAD", q: 49,   avg: 19.32918, px: 13.29, d: 0, acct: "reer-cad", seed: 25 },
-    { t: "MDA",    n: "MDA Space Ltd",            sec: "Aerospace",    ccy: "CAD", q: 45,   avg: 39.60,    px: 59.11, d: 0, acct: "reer-cad", seed: 26 },
-    { t: "SHLD",   n: "Global X Defence ETF",     sec: "ETF",          ccy: "CAD", q: 40,   avg: 28.44,    px: 25.30, d: 0, acct: "reer-cad", seed: 27 },
-    { t: "BTCC.B", n: "Purpose Bitcoin Non-Hgd",  sec: "Crypto",       ccy: "CAD", q: 38,   avg: 16.38947, px: 12.35, d: 0, acct: "reer-cad", seed: 28 },
-    { t: "ATD",    n: "Alimentation Couche-Tard", sec: "Consumer",     ccy: "CAD", q: 32,   avg: 84.22,    px: 82.37, d: 0, acct: "reer-cad", seed: 29 },
-    { t: "ZWP",    n: "BMO Euro Hi Div Cov ETF",  sec: "ETF",          ccy: "CAD", q: 31,   avg: 19.30355, px: 21.12, d: 0, acct: "reer-cad", seed: 30 },
-    { t: "ADEN",   n: "Adentra Inc",              sec: "Industrials",  ccy: "CAD", q: 30,   avg: 29.72,    px: 35.19, d: 0, acct: "reer-cad", seed: 31 },
-    { t: "QQC",    n: "Invesco NASDAQ 100 ETF",   sec: "ETF",          ccy: "CAD", q: 21,   avg: 51.07,    px: 51.22, d: 0, acct: "reer-cad", seed: 32 },
-    { t: "ASML",   n: "ASML Holding CDR",         sec: "Semiconductors",ccy:"CAD", q: 20,   avg: 47.40,    px: 53.80, d: 0, acct: "reer-cad", seed: 33 },
-    { t: "FCUV",   n: "Fidelity US Value ETF",    sec: "ETF",          ccy: "CAD", q: 20,   avg: 27.29,    px: 27.45, d: 0, acct: "reer-cad", seed: 34 },
-    { t: "LAC",    n: "Lithium Americas",         sec: "Materials",    ccy: "CAD", q: 20,   avg: 7.57,     px: 6.14,  d: 0, acct: "reer-cad", seed: 35 },
-    { t: "ENB",    n: "Enbridge Inc",             sec: "Energy",       ccy: "CAD", q: 15,   avg: 56.01533, px: 77.47, d: 0, acct: "reer-cad", seed: 36 },
-    { t: "MDI",    n: "Major Drilling Group",     sec: "Industrials",  ccy: "CAD", q: 15,   avg: 8.54533,  px: 15.27, d: 0, acct: "reer-cad", seed: 37 },
-    { t: "TECK.B", n: "Teck Resources B",         sec: "Materials",    ccy: "CAD", q: 14,   avg: 75.96,    px: 88.93, d: 0, acct: "reer-cad", seed: 38 },
-    { t: "ZGI",    n: "BMO Glb Infras Index ETF", sec: "ETF",          ccy: "CAD", q: 10,   avg: 53.00,    px: 59.16, d: 0, acct: "reer-cad", seed: 39 },
-    { t: "EFX",    n: "Enerflex Ltd",             sec: "Energy",       ccy: "CAD", q: 10,   avg: 31.59,    px: 35.11, d: 0, acct: "reer-cad", seed: 40 },
-    { t: "X",      n: "TMX Group",                sec: "Financials",   ccy: "CAD", q: 7,    avg: 45.88143, px: 47.44, d: 0, acct: "reer-cad", seed: 41 },
-    { t: "BTCC",   n: "Purpose Bitcoin ETF Hgd",  sec: "Crypto",       ccy: "CAD", q: 6,    avg: 14.55,    px: 11.09, d: 0, acct: "reer-cad", seed: 42 },
-    { t: "DRM",    n: "Dream Unlimited A",        sec: "Real Estate",  ccy: "CAD", q: 3,    avg: 22.15,    px: 19.75, d: 0, acct: "reer-cad", seed: 43 },
-    { t: "XCH",    n: "iShares China Index ETF",  sec: "ETF",          ccy: "CAD", q: 1,    avg: 24.60,    px: 22.50, d: 0, acct: "reer-cad", seed: 44 },
-
-    // ===== CAD TFSA (celi-cad) =====
-    { t: "SOLQ",   n: "3iQ Solana Staking ETF",   sec: "Crypto",       ccy: "CAD", q: 1575, avg: 11.47139, px: 7.95,  d: 0, acct: "celi-cad", seed: 45 },
-    { t: "ETHX.B", n: "CI Galaxy Ethereum",       sec: "Crypto",       ccy: "CAD", q: 1419, avg: 11.29871, px: 8.55,  d: 0, acct: "celi-cad", seed: 46 },
-    { t: "ETHH.B", n: "Purpose Ether CAD-Hgd",    sec: "Crypto",       ccy: "CAD", q: 1445, avg: 10.30268, px: 8.09,  d: 0, acct: "celi-cad", seed: 47 },
-    { t: "ETHY.B", n: "Purpose Ether CAD-Hgd",    sec: "Crypto",       ccy: "CAD", q: 507,  avg: 3.2511,   px: 1.65,  d: 0, acct: "celi-cad", seed: 48 },
-    { t: "COPR",   n: "Coppernico Metals",         sec: "Materials",    ccy: "CAD", q: 1125, avg: 0.45489,  px: 0.370, d: 0, acct: "celi-cad", seed: 49 },
-    { t: "BIGT",   n: "Big Tree Carbon",           sec: "Materials",    ccy: "CAD", q: 1000, avg: 0.0075,   px: 0.015, d: 0, acct: "celi-cad", seed: 50 },
-    { t: "VLE",    n: "Valeura Energy",            sec: "Energy",       ccy: "CAD", q: 130,  avg: 4.28792,  px: 11.16, d: 0, acct: "celi-cad", seed: 51 },
-    { t: "MNC",    n: "Magnetic North Acquis",     sec: "Financials",   ccy: "CAD", q: 110,  avg: 0.11682,  px: 0.001, d: 0, acct: "celi-cad", seed: 52 },
-    { t: "HCAL",   n: "Hamilton Enh Cdn Bank ETF", sec: "ETF",          ccy: "CAD", q: 102,  avg: 35.12059, px: 48.80, d: 0, acct: "celi-cad", seed: 53 },
-    { t: "URC",    n: "Uranium Royalty",           sec: "Materials",    ccy: "CAD", q: 100,  avg: 5.475,    px: 4.18,  d: 0, acct: "celi-cad", seed: 54 },
-    { t: "GPUS",   n: "Alset AI Ventures",         sec: "Software",     ccy: "CAD", q: 100,  avg: 0.23,     px: 0.135, d: 0, acct: "celi-cad", seed: 55 },
-    { t: "PNG",    n: "Kraken Robotics",           sec: "Industrials",  ccy: "CAD", q: 55,   avg: 5.79273,  px: 7.60,  d: 0, acct: "celi-cad", seed: 56 },
-    { t: "LSPD",   n: "Lightspeed Commerce",       sec: "Software",     ccy: "CAD", q: 46,   avg: 24.35,    px: 13.29, d: 0, acct: "celi-cad", seed: 57 },
-    { t: "KEY",    n: "Keyera Corp",               sec: "Energy",       ccy: "CAD", q: 39,   avg: 50.55333, px: 56.46, d: 0, acct: "celi-cad", seed: 58 },
-    { t: "ZWU",    n: "BMO Covered Call Util ETF", sec: "ETF",          ccy: "CAD", q: 34,   avg: 11.65706, px: 11.95, d: 0, acct: "celi-cad", seed: 59 },
-    { t: "MDA",    n: "MDA Space Ltd",             sec: "Aerospace",    ccy: "CAD", q: 30,   avg: 39.61,    px: 59.11, d: 0, acct: "celi-cad", seed: 60 },
-    { t: "FRSH",   n: "FreshLocal Solutions",      sec: "Software",     ccy: "CAD", q: 24,   avg: 0.385,    px: 0.385, d: 0, acct: "celi-cad", seed: 61 },
-    { t: "SHLD",   n: "Global X Defence ETF",      sec: "ETF",          ccy: "CAD", q: 20,   avg: 28.44,    px: 25.30, d: 0, acct: "celi-cad", seed: 62 },
-    { t: "FCUV",   n: "Fidelity US Value ETF",     sec: "ETF",          ccy: "CAD", q: 20,   avg: 27.30,    px: 27.45, d: 0, acct: "celi-cad", seed: 63 },
-    { t: "AP.UN",  n: "Allied Properties REIT",    sec: "Real Estate",  ccy: "CAD", q: 20,   avg: 10.37,    px: 10.22, d: 0, acct: "celi-cad", seed: 64 },
-    { t: "X",      n: "TMX Group",                 sec: "Financials",   ccy: "CAD", q: 20,   avg: 29.30,    px: 47.44, d: 0, acct: "celi-cad", seed: 65 },
-    { t: "TSLA",   n: "Tesla CDR (CAD-Hgd)",       sec: "Auto",         ccy: "CAD", q: 20,   avg: 37.76,    px: 34.60, d: 0, acct: "celi-cad", seed: 66 },
-    { t: "ATD",    n: "Alimentation Couche-Tard",  sec: "Consumer",     ccy: "CAD", q: 17,   avg: 73.32176, px: 82.37, d: 0, acct: "celi-cad", seed: 67 },
-    { t: "NVDA",   n: "NVIDIA CDR (CAD-Hgd)",      sec: "Semiconductors",ccy:"CAD", q: 16,   avg: 48.09,    px: 46.95, d: 0, acct: "celi-cad", seed: 68 },
-    { t: "RUS",    n: "Russel Metals",             sec: "Materials",    ccy: "CAD", q: 15,   avg: 48.57,    px: 63.37, d: 0, acct: "celi-cad", seed: 69 },
-    { t: "ENB",    n: "Enbridge Inc",              sec: "Energy",       ccy: "CAD", q: 13,   avg: 67.86538, px: 77.47, d: 0, acct: "celi-cad", seed: 70 },
-    { t: "ASML",   n: "ASML Holding CDR",          sec: "Semiconductors",ccy:"CAD", q: 10,   avg: 47.40,    px: 53.80, d: 0, acct: "celi-cad", seed: 71 },
-    { t: "QQC",    n: "Invesco NASDAQ 100 ETF",    sec: "ETF",          ccy: "CAD", q: 10,   avg: 51.06,    px: 51.22, d: 0, acct: "celi-cad", seed: 72 },
-    { t: "LAC",    n: "Lithium Americas",          sec: "Materials",    ccy: "CAD", q: 10,   avg: 7.57,     px: 6.14,  d: 0, acct: "celi-cad", seed: 73 },
-    { t: "DFSC",   n: "Defence Technologies",      sec: "Industrials",  ccy: "CAD", q: 10,   avg: 4.11,     px: 4.77,  d: 0, acct: "celi-cad", seed: 74 },
-    { t: "CJT",    n: "Cargojet Inc",              sec: "Industrials",  ccy: "CAD", q: 9,    avg: 129.87111,px: 81.62, d: 0, acct: "celi-cad", seed: 75 },
-    { t: "MTCH",   n: "Match Group",               sec: "Software",     ccy: "CAD", q: 9,    avg: 58.46222, px: 50.17, d: 0, acct: "celi-cad", seed: 76 },
-    { t: "MTY",    n: "MTY Food Group",            sec: "Consumer",     ccy: "CAD", q: 8,    avg: 44.145,   px: 39.19, d: 0, acct: "celi-cad", seed: 77 },
-    { t: "X.TMX",  n: "TMX Group",                 sec: "Financials",   ccy: "CAD", q: 7,    avg: 45.88,    px: 47.44, d: 0, acct: "celi-cad", seed: 78 },
-    { t: "BNS",    n: "Bank of Nova Scotia",       sec: "Financials",   ccy: "CAD", q: 6,    avg: 82.375,   px: 123.48,d: 0, acct: "celi-cad", seed: 79 },
-    { t: "ZGI",    n: "BMO Glb Infras Index ETF",  sec: "ETF",          ccy: "CAD", q: 6,    avg: 53.01,    px: 59.16, d: 0, acct: "celi-cad", seed: 80 },
-    { t: "CNR",    n: "Canadian National Railway", sec: "Industrials",  ccy: "CAD", q: 5,    avg: 145.852,  px: 159.73,d: 0, acct: "celi-cad", seed: 81 },
-    { t: "EFX",    n: "Enerflex Ltd",              sec: "Energy",       ccy: "CAD", q: 5,    avg: 31.59,    px: 35.11, d: 0, acct: "celi-cad", seed: 82 },
-    { t: "MTL",    n: "Mullen Group",              sec: "Industrials",  ccy: "CAD", q: 5,    avg: 11.75,    px: 21.78, d: 0, acct: "celi-cad", seed: 83 },
-    { t: "DRM",    n: "Dream Unlimited A",         sec: "Real Estate",  ccy: "CAD", q: 4,    avg: 23.48,    px: 19.75, d: 0, acct: "celi-cad", seed: 84 },
-    { t: "MATR",   n: "Mattr Corp",                sec: "Industrials",  ccy: "CAD", q: 4,    avg: 14.7925,  px: 12.61, d: 0, acct: "celi-cad", seed: 85 },
-    { t: "GSY",    n: "goeasy Ltd",                sec: "Financials",   ccy: "CAD", q: 2,    avg: 36.17,    px: 41.60, d: 0, acct: "celi-cad", seed: 86 },
-    { t: "BIP.UN", n: "Brookfield Infra Partners", sec: "Real Estate",  ccy: "CAD", q: 1,    avg: 44.71,    px: 52.11, d: 0, acct: "celi-cad", seed: 87 },
-    { t: "MHCD",   n: "Middlefield Hlth Div ETF",  sec: "ETF",          ccy: "CAD", q: 1,    avg: 11.83,    px: 11.28, d: 0, acct: "celi-cad", seed: 88 },
-    { t: "TOI",    n: "Topicus.com Inc",           sec: "Software",     ccy: "CAD", q: 1,    avg: 76.51,    px: 98.44, d: 0, acct: "celi-cad", seed: 89 },
-
-    // ===== USD TFSA (celi-usd) =====
-    { t: "HIMS",   n: "Hims & Hers Health",        sec: "Healthcare",   ccy: "USD", q: 21,   avg: 24.77095, px: 35.47, d: 0, acct: "celi-usd", seed: 90 },
-    { t: "ETOR",   n: "eToro Group",               sec: "Fintech",      ccy: "USD", q: 15,   avg: 39.60,    px: 39.09, d: 0, acct: "celi-usd", seed: 91 },
-    { t: "EDSA",   n: "Edesa Biotech",             sec: "Healthcare",   ccy: "USD", q: 15,   avg: 10.42467, px: 7.35,  d: 0, acct: "celi-usd", seed: 92 },
-    { t: "DFH",    n: "Dream Finders Homes",       sec: "Consumer",     ccy: "USD", q: 10,   avg: 20.362,   px: 15.60, d: 0, acct: "celi-usd", seed: 93 },
-    { t: "ETHA",   n: "iShares Ethereum Trust",    sec: "Crypto",       ccy: "USD", q: 9,    avg: 12.39667, px: 12.88, d: 0, acct: "celi-usd", seed: 94 },
-    { t: "CRCL",   n: "Circle Internet Group",     sec: "Fintech",      ccy: "USD", q: 8,    avg: 103.96,   px: 80.23, d: 0, acct: "celi-usd", seed: 95 },
-    { t: "PINS",   n: "Pinterest Inc",             sec: "Software",     ccy: "USD", q: 8,    avg: 24.42625, px: 20.27, d: 0, acct: "celi-usd", seed: 96 },
-    { t: "TAN",    n: "Invesco Solar ETF",         sec: "ETF",          ccy: "USD", q: 7,    avg: 69.20143, px: 60.58, d: 0, acct: "celi-usd", seed: 97 },
-    { t: "MNSB",   n: "Mainstreet Bancshares",     sec: "Financials",   ccy: "USD", q: 7,    avg: 21.52286, px: 23.86, d: 0, acct: "celi-usd", seed: 98 },
-    { t: "BMNR",   n: "Bitmine Immersion Tech",    sec: "Crypto",       ccy: "USD", q: 6,    avg: 19.36,    px: 16.14, d: 0, acct: "celi-usd", seed: 99 },
-    { t: "NVDA",   n: "NVIDIA Corp",               sec: "Semiconductors",ccy:"USD", q: 5,    avg: 215.356,  px: 210.69,d: 0, acct: "celi-usd", seed: 100 },
-    { t: "LUMN",   n: "Lumen Technologies",        sec: "Telecom",      ccy: "USD", q: 14,   avg: 6.235,    px: 8.20,  d: 0, acct: "celi-usd", seed: 101 },
-    { t: "COHN",   n: "Cohen & Company",           sec: "Financials",   ccy: "USD", q: 3,    avg: 12.20667, px: 11.90, d: 0, acct: "celi-usd", seed: 102 },
-    { t: "HPQ",    n: "HP Inc",                     sec: "Hardware",     ccy: "USD", q: 3,    avg: 29.43,    px: 23.50, d: 0, acct: "celi-usd", seed: 103 },
-    { t: "IREN",   n: "IREN Ltd",                  sec: "Crypto",       ccy: "USD", q: 3,    avg: 61.38,    px: 59.96, d: 0, acct: "celi-usd", seed: 104 },
-    { t: "SSRM",   n: "SSR Mining",                sec: "Materials",    ccy: "USD", q: 3,    avg: 30.91,    px: 30.95, d: 0, acct: "celi-usd", seed: 105 },
-    { t: "VEA",    n: "Vanguard FTSE Dev Mkt ETF", sec: "ETF",          ccy: "USD", q: 3,    avg: 60.55333, px: 72.31, d: 0, acct: "celi-usd", seed: 106 },
-    { t: "AMD",    n: "Advanced Micro Devices",    sec: "Semiconductors",ccy:"USD", q: 2,    avg: 494.95,   px: 537.37,d: 0, acct: "celi-usd", seed: 107 },
-    { t: "TSLA",   n: "Tesla Inc",                 sec: "Auto",         ccy: "USD", q: 2,    avg: 431.965,  px: 400.49,d: 0, acct: "celi-usd", seed: 108 },
-
-    // ===== USD RRSP (reer-usd) =====
-    { t: "TSM",    n: "Taiwan Semiconductor ADR",  sec: "Semiconductors",ccy:"USD", q: 4,    avg: 94.01,    px: 462.12,d: 0, acct: "reer-usd", seed: 109 },
-    { t: "TSLA",   n: "Tesla Inc",                 sec: "Auto",         ccy: "USD", q: 2,    avg: 363.195,  px: 400.49,d: 0, acct: "reer-usd", seed: 110 },
-    { t: "VEA",    n: "Vanguard FTSE Dev Mkt ETF", sec: "ETF",          ccy: "USD", q: 4,    avg: 71.275,   px: 72.31, d: 0, acct: "reer-usd", seed: 111 },
-    { t: "IREN",   n: "IREN Ltd",                  sec: "Crypto",       ccy: "USD", q: 6,    avg: 61.38,    px: 59.96, d: 0, acct: "reer-usd", seed: 112 },
-    { t: "COIN",   n: "Coinbase Global",           sec: "Fintech",      ccy: "USD", q: 2,    avg: 298.795,  px: 163.26,d: 0, acct: "reer-usd", seed: 113 },
-    { t: "LUMN",   n: "Lumen Technologies",        sec: "Telecom",      ccy: "USD", q: 10,   avg: 6.778,    px: 8.20,  d: 0, acct: "reer-usd", seed: 114 },
-    { t: "EDSA",   n: "Edesa Biotech",             sec: "Healthcare",   ccy: "USD", q: 11,   avg: 11.70455, px: 7.35,  d: 0, acct: "reer-usd", seed: 115 },
-    { t: "TAN",    n: "Invesco Solar ETF",         sec: "ETF",          ccy: "USD", q: 4,    avg: 71.0825,  px: 60.58, d: 0, acct: "reer-usd", seed: 116 },
-    { t: "SSRM",   n: "SSR Mining",                sec: "Materials",    ccy: "USD", q: 3,    avg: 30.88,    px: 30.95, d: 0, acct: "reer-usd", seed: 117 },
-    { t: "HPQ",    n: "HP Inc",                     sec: "Hardware",     ccy: "USD", q: 3,    avg: 29.37667, px: 23.50, d: 0, acct: "reer-usd", seed: 118 },
-    { t: "CRCL",   n: "Circle Internet Group",     sec: "Fintech",      ccy: "USD", q: 1,    avg: 105.30,   px: 80.23, d: 0, acct: "reer-usd", seed: 119 },
-
-    // ===== Crypto Direct — non-registered exchange account (spot coins, USD), Jun 18 2026 =====
-    { t: "XRP",    n: "XRP",                       sec: "Crypto", ccy: "USD", q: 25169,  avg: 0.9095,  px: 1.136,   d: 0, acct: "crypto-direct", seed: 120 },
-    { t: "LINK",   n: "Chainlink",                 sec: "Crypto", ccy: "USD", q: 2257.2, avg: 10.33,   px: 7.87,    d: 0, acct: "crypto-direct", seed: 121 },
-    { t: "SUI",    n: "Sui",                        sec: "Crypto", ccy: "USD", q: 22472,  avg: 1.1616,  px: 0.7188,  d: 0, acct: "crypto-direct", seed: 122 },
-    { t: "SOL",    n: "Solana",                     sec: "Crypto", ccy: "USD", q: 138.18, avg: 78.64,   px: 68.82,   d: 0, acct: "crypto-direct", seed: 123 },
-    { t: "ONDO",   n: "Ondo Finance",              sec: "Crypto", ccy: "USD", q: 17280,  avg: 0.2826,  px: 0.3506,  d: 0, acct: "crypto-direct", seed: 124 },
-    { t: "TRX",    n: "TRON",                       sec: "Crypto", ccy: "USD", q: 17798,  avg: 0.1091,  px: 0.319,   d: 0, acct: "crypto-direct", seed: 125 },
-    { t: "TAO",    n: "Bittensor",                  sec: "Crypto", ccy: "USD", q: 20.31,  avg: 254.76,  px: 233.46,  d: 0, acct: "crypto-direct", seed: 126 },
-    { t: "RENDER", n: "Render",                     sec: "Crypto", ccy: "USD", q: 1103.9, avg: 1.838,   px: 1.66,    d: 0, acct: "crypto-direct", seed: 127 },
-    { t: "DOGE",   n: "Dogecoin",                   sec: "Crypto", ccy: "USD", q: 5695,   avg: 0.230,   px: 0.08257, d: 0, acct: "crypto-direct", seed: 128 },
-  ];
-
-  const allHoldings = raw.map((h) => {
-    const marketValue = h.px * h.q;
-    const costBasis = h.avg * h.q;
-    const plAbs = marketValue - costBasis;
-    const plPct = (plAbs / costBasis) * 100;
-    const dayAbs = marketValue - marketValue / (1 + h.d / 100);
-    const divYield = ({ ETF: 3.2, "Real Estate": 5.4, Energy: 4.1, Financials: 4.6, Telecom: 6.8 }[h.sec]) || 0;
-    return {
-      ticker: h.t, name: h.n, sector: h.sec, ccy: h.ccy, shares: h.q, avgCost: h.avg,
-      price: h.px, dayPct: h.d, acct: h.acct, seed: h.seed,
-      marketValue, costBasis, plAbs, plPct, dayAbs, divYield,
-      annualIncome: marketValue * divYield / 100,
-      spark: spark(h.seed, 32, plPct > 0),
-    };
-  });
-
-  const toCAD = (v, ccy) => (ccy === "USD" ? v * FX : v);
-  let DISP = "CAD"; // display currency
-  function convert(v, from) {
-    if (from === DISP) return v;
-    if (from === "USD" && DISP === "CAD") return v * FX;
-    if (from === "CAD" && DISP === "USD") return v / FX;
-    return v;
-  }
-
-  function buildView(acctId) {
-    const isAll = acctId === "all";
-    const isCrypto = acctId === "crypto";
-    let holdings, cashRaw, cashCcy;
-    if (isAll) {
-      holdings = allHoldings.slice();
-      cashRaw = accounts.map((a) => convert(a.cash, a.ccy)).reduce((s, x) => s + x, 0);
-      cashCcy = DISP;
-    } else if (isCrypto) {
-      holdings = allHoldings.filter((h) => h.sector === "Crypto");
-      cashRaw = 0; cashCcy = DISP;
-    } else {
-      const acct = accounts.find((a) => a.id === acctId);
-      holdings = allHoldings.filter((h) => h.acct === acctId);
-      cashRaw = acct ? convert(acct.cash, acct.ccy) : 0; cashCcy = DISP;
-    }
-    const cash = cashRaw; // already in DISP
-    const conv = (h) => convert(h.marketValue, h.ccy);
-    const convC = (h) => convert(h.costBasis, h.ccy);
-    const convD = (h) => convert(h.dayAbs, h.ccy);
-
-    const totalValue = holdings.reduce((s, h) => s + conv(h), 0);
-    const totalCost = holdings.reduce((s, h) => s + convC(h), 0);
-    const equity = totalValue + cash;
-    const dispH = holdings.map((h) => ({ ...h, dispValue: conv(h), weight: equity ? (conv(h) / equity) * 100 : 0 }));
-    dispH.sort((a, b) => b.dispValue - a.dispValue);
-
-    const dayChangeAbs = holdings.reduce((s, h) => s + convD(h), 0);
-    const dayChangePct = equity ? (dayChangeAbs / (equity - dayChangeAbs)) * 100 : 0;
-    const totalPlAbs = totalValue - totalCost;
-    const totalPlPct = totalCost ? (totalPlAbs / totalCost) * 100 : 0;
-    const income = holdings.reduce((s, h) => s + convert(h.annualIncome, h.ccy), 0);
-
-    // 1Y series ending at equity, shaped by total return
-    const seed = isAll ? 2024 : 3000 + acctId.length * 31;
-    const portfolio = series(seed, DAYS, equity / (1 + totalPlPct / 100), totalPlPct / 100, 0.012);
-    const pEnd = portfolio[portfolio.length - 1];
-    for (let i = 0; i < portfolio.length; i++) portfolio[i] = (portfolio[i] / pEnd) * equity;
-
-    // allocation by sector
-    const map = {};
-    dispH.forEach((h) => { map[h.sector] = (map[h.sector] || 0) + h.dispValue; });
-    const allocation = Object.entries(map).map(([name, value]) => ({ name, value, pct: (value / equity) * 100 }))
-      .sort((a, b) => b.value - a.value);
-    if (cash > 0) allocation.push({ name: "Cash", value: cash, pct: (cash / equity) * 100 });
-
-    return {
-      holdings: dispH, allocation, portfolio,
-      kpis: { equity, totalValue, cash, totalCost, dayChangeAbs, dayChangePct,
-              totalPlAbs, totalPlPct, ytdReturnPct: totalPlPct, income, ccy: DISP, targetPct: 60, fx: FX },
-    };
-  }
-
-  const sp500 = series(7, DAYS, 100, 0.16, 0.007);
-  const nasdaq = series(13, DAYS, 100, 0.24, 0.010);
-  for (let i = sp500.length - 1; i >= 0; i--) sp500[i] = (sp500[i] / sp500[0]) * 100;
-  for (let i = nasdaq.length - 1; i >= 0; i--) nasdaq[i] = (nasdaq[i] / nasdaq[0]) * 100;
-
-  const watchlist = [
-    { ticker: "SMCI", name: "Super Micro",  price:  48.21, dayPct:  7.62, seed: 101 },
-    { ticker: "ARM",  name: "Arm Holdings", price: 138.90, dayPct:  3.05, seed: 102 },
-    { ticker: "MU",   name: "Micron Tech",  price: 102.34, dayPct: -2.41, seed: 103 },
-    { ticker: "DND",  name: "Dye & Durham", price:  14.20, dayPct:  2.94, seed: 104 },
-    { ticker: "GPUS", name: "Hyperscale",   price:   2.10, dayPct:  3.57, seed: 105 },
-    { ticker: "EFX",  name: "Enerflex",     price:  11.80, dayPct:  3.04, seed: 106 },
-  ].map((w) => ({ ...w, spark: spark(w.seed, 28, w.dayPct > 0) }));
-  const movers = [...allHoldings, ...watchlist].sort((a, b) => b.dayPct - a.dayPct);
-
-  // ---- RENDEMENT: real CELI-CAD figures; generated for others ----
-  const REAL = {
-    "celi-cad": {
-      annual: {
-        labels: ["2022", "2023", "2024", "2025", "Année courante"],
-        ret:    [-59.91, 56.83, 52.43, -6.83, -21.48],
-        sharpe: [-0.89, 2.44, 0.76, -0.14, -1.67],
-        initial:[40835.28, 29850.56, 62884.51, 107486.44, 97346.68],
-        inflow: [20490.72, 14837.35, 8000.00, 7001.00, 8000.00],
-        outflow:[-1234.35, -1385.52, -769.51, -11500.00, -717.34],
-        variation:[-30241.09, 19582.12, 37371.44, -5640.76, -20548.00],
-        final:  [29850.56, 62884.51, 107486.44, 97346.68, 84081.34],
-      },
-      cumul: {
-        labels: ["3 mois", "6 mois", "1 an", "3 ans", "5 ans", "Depuis l'ouverture"],
-        ret:    [-7.12, -22.36, -6.12, 12.52, -3.64, -2.51],
-        sharpe: [-0.90, -1.71, -0.20, 0.19, -0.10, -0.08],
-      },
-    },
-  };
-
-  function genRows(seed, labels, start, scale) {
-    const rnd = mulberry32(seed); let value = start; const rows = [];
-    for (let i = 0; i < labels.length; i++) {
-      const ret = ((rnd() - 0.45) * 2) * scale;
-      const inflow = Math.round(rnd() * start * 0.1);
-      const outflow = -Math.round(rnd() * start * 0.04);
-      const base = value + inflow + outflow;
-      const variation = base * (ret / 100);
-      const final = base + variation;
-      rows.push({ label: labels[i], ret, sharpe: ret / 100 / 0.18, initial: value, inflow, outflow, variation, final });
-      value = final;
-    }
-    return rows;
-  }
-  function realRows(block) {
-    return block.labels.map((label, i) => ({
-      label, ret: block.ret[i], sharpe: block.sharpe[i],
-      initial: block.initial ? block.initial[i] : 0,
-      inflow: block.inflow ? block.inflow[i] : 0,
-      outflow: block.outflow ? block.outflow[i] : 0,
-      variation: block.variation ? block.variation[i] : 0,
-      final: block.final ? block.final[i] : 0,
+// ---- macro & finance news (live via feed, honest demo fallback) ----
+const CK_MOCK_NEWS = [
+  { headline: "Strait of Hormuz tensions keep a risk premium in crude", source: "Reuters", tone: -2.1, tag: "Geopolitics" },
+  { headline: "Fed chair Warsh signals patience on rate cuts amid sticky core CPI", source: "Bloomberg", tone: -0.8, tag: "Monetary" },
+  { headline: "AI capex cycle broadens beyond mega-cap; concentration risk debated", source: "FT", tone: 0.6, tag: "Equities" },
+  { headline: "Gold extends gains as central banks keep accumulating reserves", source: "WGC", tone: 1.1, tag: "Commodities" },
+  { headline: "Canadian dollar firms on stronger commodity terms of trade", source: "BoC", tone: 0.5, tag: "FX" },
+];
+function ckNews() {
+  const live = window.HelmFeed && window.HelmFeed.news;
+  if (live && live.length) {
+    return live.filter((n) => n.headline).slice(0, 6).map((n) => ({
+      headline: n.headline, source: n.source || "—", tone: n.tone || 0, url: n.url,
+      tag: n.ticker && n.ticker !== "MACRO" ? n.ticker : "Macro",
     }));
   }
-  function cumulFromIndividual(rows, cumulBlock) {
-    // build cumulative rows; if real cumul provided use it, else compound
-    if (cumulBlock) return realRows(cumulBlock);
-    let cumR = 1, cumV = 0;
-    return rows.map((r) => { cumR *= 1 + r.ret / 100; cumV += r.variation;
-      return { label: r.label, ret: (cumR - 1) * 100, sharpe: r.sharpe, variation: cumV,
-               initial: rows[0].initial, inflow: r.inflow, outflow: r.outflow, final: r.final }; });
-  }
+  return CK_MOCK_NEWS;
+}
 
-  function buildRendement(acctId) {
-    const real = REAL[acctId];
-    const start = buildView(acctId).kpis.equity / 2.2 || 40000;
-    const seed = 51 + acctId.length * 13;
-    const annualLabels = ["2022", "2023", "2024", "2025", "Année courante"];
-    const monthLabels = ["Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun"];
-    const cumulLabels = ["3 mois", "6 mois", "1 an", "3 ans", "5 ans", "Depuis l'ouverture"];
+function Cockpit({ accent, onNav, onPick }) {
+  const D = window.PMData;
+  const [, force] = useCkState(0);
+  React.useEffect(() => {
+    const h = () => force((n) => n + 1);
+    window.addEventListener("helm:feed", h); window.addEventListener("helm:regime", h); window.addEventListener("helm:drift", h);
+    return () => { window.removeEventListener("helm:feed", h); window.removeEventListener("helm:regime", h); window.removeEventListener("helm:drift", h); };
+  }, []);
 
-    const annualInd = real ? realRows(real.annual) : genRows(seed, annualLabels, start, 34);
-    const annualCum = real ? realRows(real.cumul) : cumulFromIndividual(genRows(seed + 1, cumulLabels, start, 18));
-    const monthInd = genRows(seed + 3, monthLabels, start * 1.6, 7);
-    const monthCum = cumulFromIndividual(genRows(seed + 4, ["1 mois", "3 mois", "6 mois", "ÀCJ", "1 an"], start * 1.6, 6));
+  const mode = window.HelmMode || "Standard";
+  const minimal = mode === "Minimal";
+  const st = window.computeHelmState ? window.computeHelmState() : null;
+  let regime = window.HelmRegime;
+  if (!regime && window.classifyRegime) { const r = window.classifyRegime(); regime = { label: r.label, bias: r.bias, key: r.key, geoScore: 0 }; window.HelmRegime = regime; }
+  const drift = window.HelmDrift;
+  const view = D.buildView("all");
+  const K = view.kpis;
+  const cfg = ckCfg(st ? st.p.riskProfile.toLowerCase() : "balanced");
 
-    return {
-      annual: { individual: annualInd, cumulative: annualCum },
-      monthly: { individual: monthInd, cumulative: monthCum },
-    };
-  }
+  // ---- aggregate holdings by ticker for sell/trim scan ----
+  const byT = {};
+  D.allHoldings.forEach((h) => {
+    if (!byT[h.ticker]) byT[h.ticker] = { ticker: h.ticker, name: h.name, sector: h.sector, price: h.price, spark: h.spark, divYield: h.divYield || 0, mv: 0, cost: 0, held: true };
+    const q = h.qty || h.q || 0; byT[h.ticker].mv += (h.marketValue || h.price * q); byT[h.ticker].cost += (h.costBasis || (h.avg || h.price) * q);
+  });
+  const holds = Object.values(byT).map((h) => { h.plPct = h.cost ? ((h.mv - h.cost) / h.cost) * 100 : 0; h.weight = K.equity ? (h.mv / K.equity) * 100 : 0; return h; });
 
-  // ---- live feed adapter: patch holdings from quotes.json + prices.json + fx.json ----
-  // Crypto ETFs track their underlying coin's daily move (price level differs, so we apply
-  // only the % change from the coin quote, keeping the ETF's own price level).
-  const ETF_UNDERLYING = { "SOLQ": "SOL", "ETHX.B": "ETH" };
+  // ---- score: exits/trims from holdings (risk-first), buys from universe ----
+  const sig = (h) => window.signalsFor ? window.signalsFor(h, cfg) : null;
+  const dur = (s) => window.helmDurationOf ? window.helmDurationOf(s) : { k: "Weeks" };
 
-  function applyLive(feed) {
-    if (!feed) return false;
-    let touched = 0, fxSet = false;
-    if (feed.fx && feed.fx.USDCAD) { FX = feed.fx.USDCAD; fxSet = true; }
-    const q = feed.quotes || {};
-    const px = feed.prices || {};
+  const exits = holds.map((h) => ({ h, s: sig(h) })).filter((x) => x.s && x.s.action === "Sell")
+    .sort((a, b) => a.s.composite - b.s.composite)
+    .map((x) => ({ kind: x.s.sellKind === "Exit" ? "Exit" : "Trim", ...x }));
 
-    const recompute = (h) => {
-      h.marketValue = h.price * h.shares;
-      h.plAbs = h.marketValue - h.costBasis;
-      h.plPct = h.costBasis ? (h.plAbs / h.costBasis) * 100 : 0;
-      h.dayAbs = h.marketValue - h.marketValue / (1 + h.dayPct / 100);
-      h.annualIncome = h.marketValue * h.divYield / 100;
-    };
+  const universe = (window.HelmUniverse || holds);
+  const buys = universe.map((h) => ({ h, s: sig(h) })).filter((x) => x.s && x.s.action === "Buy")
+    .sort((a, b) => b.s.composite - a.s.composite).slice(0, 5)
+    .map((x) => ({ kind: "Buy", ...x }));
 
-    allHoldings.forEach((h) => {
-      const k = q[h.ticker];
-      if (k && k.last) {                    // direct live quote (US stocks, matched tickers)
-        h.price = k.last;
-        if (k.chgPct != null) h.dayPct = k.chgPct;
-        recompute(h); touched++; return;
-      }
-      const series = px[h.ticker];          // EOD close history for this exact ticker
-      if (Array.isArray(series) && series.length) {
-        const last = series[series.length - 1], prev = series[series.length - 2] || last;
-        h.price = last.c;
-        if (prev.c) h.dayPct = (last.c / prev.c - 1) * 100;
-        recompute(h); touched++; return;
-      }
-      const under = ETF_UNDERLYING[h.ticker]; // crypto ETF → apply underlying's day move
-      if (under && q[under] && q[under].chgPct != null) {
-        h.dayPct = q[under].chgPct;
-        recompute(h); touched++; return;
-      }
-    });
+  let moves = [...exits.slice(0, 2), ...buys];
+  if (minimal) moves = exits;
+  moves = moves.slice(0, minimal ? 6 : 4);
 
-    Object.assign(window.PMData, buildView("all")); // refresh default snapshot
-    // live if we patched any holding; partial-live if only FX refreshed
-    return { touched, live: touched > 0 || fxSet, partial: touched === 0 && fxSet };
-  }
+  // ---- policy breaches ----
+  const breaches = [];
+  if (st && st.volOver > 0.5) breaches.push({ t: "Volatile budget", d: `${st.volPct.toFixed(0)}% vs ${st.p.specCap}% budget — ${st.volOver.toFixed(0)} pts over`, lvl: st.f.status === "Ahead" ? "high" : "warn", go: "Plan" });
+  if (drift && drift.score != null && drift.score >= 60) breaches.push({ t: "Model drift", d: `${drift.label} · confidence ${drift.conf}`, lvl: "high", go: "Learning" });
+  if (regime && /Risk-off|Defensive/.test(regime.bias)) breaches.push({ t: "Defensive regime", d: `${regime.label} — model favours de-risking`, lvl: "warn", go: "Macro" });
+  if (st && st.f.status === "Behind") breaches.push({ t: "Funded behind", d: `Funded ratio ${(st.f.ratio * 100).toFixed(0)}% — return pressure high`, lvl: "warn", go: "Plan" });
 
-  window.PMData = {
-    accounts, allHoldings, watchlist, movers, sp500, nasdaq, DAYS, DONUT_COLORS, FX,
-    buildView, buildRendement, priceHistory, applyLive,
-    setDispCcy: (c) => { DISP = c; }, getDispCcy: () => DISP,
-    getFx: () => FX,
-    ...buildView("all"),
-  };
-})();
+  // ---- the Chief's synthesized brief ----
+  const stanceWord = regime ? (/Risk-on|Constructive/.test(regime.bias) ? "lean into risk" : /Risk-off|Defensive/.test(regime.bias) ? "stay defensive" : "hold a balanced stance") : "hold a balanced stance";
+  const nBuys = moves.filter((m) => m.kind === "Buy").length;
+  const nAdj = moves.length - nBuys;
+  const adjPhrase = nAdj ? `${nAdj} readjustment${nAdj === 1 ? "" : "s"}${exits.length > nAdj ? ` (top of ${exits.length} flagged)` : ""}` : "no readjustments";
+  const lead = regime
+    ? `Recommendation: ${stanceWord}${st && st.volOver > 0.5 ? ` and bring the volatile sleeve back within budget (${st.volOver.toFixed(0)} pts over)` : regime && /Risk-on|Constructive/.test(regime.bias) ? " and put cash to work in the top-conviction names below" : /Risk-off|Defensive/.test(regime.bias) ? " — trim risk and hold quality" : " and rebalance toward target weights"}. ${minimal ? "Minimal mode — risk actions only." : moves.length ? `${nBuys} buy idea${nBuys === 1 ? "" : "s"} and ${adjPhrase} are proposed below.` : "No high-conviction moves today — sit tight; a no-trade day is a valid call."}`
+    : "Classifying the regime — open Macro → Economic CIO to initialise the engine.";
+  const doLine = breaches.length
+    ? `Do: ${breaches[0].t.toLowerCase()} first (${breaches[0].d.split("—")[0].trim()}), then review the proposed moves. Nothing else needs you today.`
+    : moves.length ? `Do: review the ${moves.length} proposed move${moves.length === 1 ? "" : "s"} below — then close the app.` : "Do: nothing. You're within policy and no setup clears the bar.";
+
+  const chips = [
+    regime && { k: "Regime", v: `${regime.label} · ${regime.bias}`, go: "Macro" },
+    st && { k: "Funded", v: `${st.f.status} ${(st.f.ratio * 100).toFixed(0)}%`, go: "Plan" },
+    st && { k: "Vol budget", v: `${st.volPct.toFixed(0)}% of ${st.p.specCap}%`, warn: st.volOver > 0.5, go: "Plan" },
+    drift && { k: "Drift", v: drift.label, warn: drift.score >= 60, go: "Learning" },
+  ].filter(Boolean);
+
+  const news = ckNews();
+  const feedLive = !!(window.HelmFeed && window.HelmFeed.status && window.HelmFeed.status.live);
+
+  const moveColor = (k) => k === "Buy" ? ckUP : k === "Exit" ? ckDN : ckWARN;
+  const NavLink = ({ to, children }) => <button className="ck-link" onClick={() => onNav && onNav(to)}>{children}</button>;
+
+  return (
+    <div className="ck">
+      <style>{COCKPIT_CSS}</style>
+
+      {/* ============ the Chief's brief — the hero ============ */}
+      <section className="pm-card ck-brief">
+        <div className="ck-brief-top">
+          <div className="ck-cio">
+            <div className="ck-cio-badge" style={{ background: accent }}>CIO</div>
+            <div>
+              <div className="ck-eyebrow">The Chief · morning brief</div>
+              <div className="ck-date">{new Date().toLocaleDateString("en-CA", { weekday: "long", month: "long", day: "numeric" })}{minimal ? " · Minimal mode" : ""}</div>
+            </div>
+          </div>
+          <div className="ck-nl">
+            <div className="ck-nl-k">Net liquidity</div>
+            <div className="ck-nl-v mono">{ckMoney(K.equity)}</div>
+            <div className="ck-nl-d mono" style={{ color: K.dayChangeAbs >= 0 ? ckUP : ckDN }}>{ckSign(K.dayChangePct)}% today</div>
+          </div>
+        </div>
+        <p className="ck-lead">{lead}</p>
+        <p className="ck-do">{doLine}</p>
+        <div className="ck-chips">
+          {chips.map((c) => (
+            <button className={`ck-chip${c.warn ? " warn" : ""}`} key={c.k} onClick={() => onNav && onNav(c.go)}>
+              <span>{c.k}</span><strong>{c.v}</strong>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <div className="ck-grid">
+        {/* ============ proposed trades & readjustments ============ */}
+        <section className="pm-card ck-moves">
+          <div className="pm-card-head">
+            <div className="pm-card-eyebrow">{minimal ? "Risk actions" : "Proposed trades & readjustments"}</div>
+            <NavLink to="Screener">Open Screener →</NavLink>
+          </div>
+          {moves.length === 0 ? (
+            <div className="ck-empty"><strong>No proposition today.</strong> No new buy clears the {st ? st.p.riskProfile : "current"} bar and no position needs trimming or reallocation — you're within policy. A no-trade day is a valid, disciplined call.</div>
+          ) : (<React.Fragment>{moves.every((m) => m.kind !== "Buy") ? <div className="ck-move-note">No new <strong>buys</strong> clear the bar today — the moves below are <strong>risk-management trims/exits</strong> to keep the book on target.</div> : null}{moves.map(({ kind, h, s }) => {
+            const d = dur(s);
+            const rr = (s.target - h.price) / Math.max(0.0001, h.price - s.stop);
+            const why = kind === "Buy" ? `Score ${s.composite}, ${s.mom >= 55 ? "trend confirmed" : "setup forming"}${regime && /Risk-on|Constructive/.test(regime.bias) ? ", regime supportive" : ""}`
+              : kind === "Exit" ? `Score ${s.composite} weak / trend broken — exit` : `Overbought ${s.rsi.toFixed(0)} — trim into strength`;
+            return (
+              <div className="ck-move" key={kind + h.ticker} onClick={() => onPick && onPick(h.ticker)}>
+                <div className="ck-move-act" style={{ color: moveColor(kind), background: moveColor(kind) + "16" }}>{kind}</div>
+                <div className="ck-move-main">
+                  <div className="ck-move-tkr">{h.ticker} <span className="ck-move-name">{h.name}</span></div>
+                  <div className="ck-move-why">{why}</div>
+                </div>
+                <div className="ck-move-nums">
+                  <div className="ck-move-tp"><span style={{ color: ckDN }}>SL {ckMoney(s.stop)}</span> · <span style={{ color: ckUP }}>TP {ckMoney(s.target)}</span></div>
+                  <div className="ck-move-meta"><span className="ck-move-dur">{d.k}</span> · R:R {rr > 0 ? rr.toFixed(1) : "—"}</div>
+                </div>
+              </div>
+            );
+          })}</React.Fragment>)}
+          <div className="ck-foot">Rule-based engine at your {st ? st.p.riskProfile : "current"} preset — click a row for full research, or <NavLink to="Strategy Lab">open Strategy Lab →</NavLink>. Not advice.</div>
+        </section>
+
+        {/* ============ right rail: news + policy ============ */}
+        <div className="ck-rail">
+          <section className="pm-card ck-news">
+            <div className="pm-card-head">
+              <div className="pm-card-eyebrow">Macro & finance news {feedLive ? "· live" : "· demo"}</div>
+              <NavLink to="Macro">Macro →</NavLink>
+            </div>
+            {news.map((n, i) => {
+              const tc = n.tone > 0.5 ? ckUP : n.tone < -0.5 ? ckDN : "var(--muted)";
+              return (
+                <div className="ck-news-row" key={i}>
+                  <div className="ck-news-top">
+                    <span className="ck-news-tag">{n.tag}</span>
+                    <span className="ck-news-tone" style={{ color: tc }}>{n.tone > 0.5 ? "▲" : n.tone < -0.5 ? "▼" : "—"}</span>
+                  </div>
+                  <div className="ck-news-h">{n.url ? <a href={n.url} target="_blank" rel="noopener">{n.headline}</a> : n.headline}</div>
+                  <div className="ck-news-src">{n.source}</div>
+                </div>
+              );
+            })}
+            {!feedLive && <div className="ck-foot">Demo headlines — connect the feed for live GDELT + Finnhub events.</div>}
+          </section>
+
+          <section className="pm-card ck-watch">
+            <div className="pm-card-eyebrow">Policy watch</div>
+            {breaches.length === 0 ? (
+              <div className="ck-clear"><div className="ck-clear-ico" style={{ background: ckUP }}>✓</div><div><strong>Within policy.</strong><span>No breaches across budget, drift, regime or funded status.</span></div></div>
+            ) : breaches.map((b) => (
+              <div className={`ck-breach ${b.lvl}`} key={b.t}>
+                <div className="ck-breach-top"><strong>{b.t}</strong><button className="ck-link" onClick={() => onNav && onNav(b.go)}>{b.go} →</button></div>
+                <div className="ck-breach-d">{b.d}</div>
+              </div>
+            ))}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const COCKPIT_CSS = `
+.ck { display: flex; flex-direction: column; gap: 14px; }
+.ck-link { font: inherit; font-size: 12px; font-weight: 600; color: var(--accent, #0e9f6e); background: none; border: 0; cursor: pointer; padding: 0; }
+.ck-link:hover { text-decoration: underline; }
+.ck-brief { padding: 22px 24px; }
+.ck-brief-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+.ck-cio { display: flex; gap: 12px; align-items: center; }
+.ck-cio-badge { width: 44px; height: 44px; border-radius: 12px; color: #fff; font-weight: 800; font-size: 13px; display: grid; place-items: center; letter-spacing: 0.02em; }
+.ck-eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.ck-date { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; margin-top: 2px; }
+.ck-nl { text-align: right; }
+.ck-nl-k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.ck-nl-v { font-size: 21px; font-weight: 700; }
+.ck-nl-d { font-size: 12px; font-weight: 600; }
+.ck-lead { font-size: 16px; line-height: 1.65; color: var(--ink); margin-top: 16px; max-width: 940px; text-wrap: pretty; }
+.ck-do { font-size: 13.5px; line-height: 1.55; color: var(--ink); margin-top: 10px; max-width: 940px; padding: 10px 14px; background: color-mix(in srgb, var(--accent, #0e9f6e) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent, #0e9f6e) 20%, var(--line)); border-radius: 9px; }
+.ck-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.ck-chip { display: inline-flex; align-items: baseline; gap: 7px; font: inherit; font-size: 11.5px; color: var(--muted); background: var(--panel-2, #f8f9fb); border: 1px solid var(--line); border-radius: 99px; padding: 5px 12px; cursor: pointer; }
+.ck-chip strong { color: var(--ink); font-weight: 600; }
+.ck-chip.warn { border-color: #d9770655; } .ck-chip.warn strong { color: #b45309; }
+.ck-chip:hover { border-color: var(--muted); }
+.ck-grid { display: grid; grid-template-columns: 1.45fr 1fr; gap: 14px; align-items: start; }
+.ck-rail { display: flex; flex-direction: column; gap: 14px; }
+.ck-move { display: flex; align-items: center; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--line-2); cursor: pointer; }
+.ck-move:hover { background: var(--panel-2); }
+.ck-move:last-of-type { border-bottom: 0; }
+.ck-move-act { font-size: 12px; font-weight: 700; padding: 4px 11px; border-radius: 7px; flex: none; width: 52px; text-align: center; }
+.ck-move-main { flex: 1; }
+.ck-move-tkr { font-size: 14.5px; font-weight: 700; }
+.ck-move-name { font-weight: 400; color: var(--muted); font-size: 12px; }
+.ck-move-why { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+.ck-move-nums { text-align: right; flex: none; }
+.ck-move-tp { font-size: 11.5px; font-family: var(--mono); }
+.ck-move-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.ck-move-dur { font-weight: 600; color: var(--ink-2); }
+.ck-empty, .ck-clear span { color: var(--muted); font-size: 13px; }
+.ck-empty { line-height: 1.55; } .ck-empty strong { color: var(--ink); }
+.ck-move-note { font-size: 12px; color: var(--ink-2); line-height: 1.5; padding: 8px 12px; margin-bottom: 10px; background: color-mix(in srgb, var(--accent, #0e9f6e) 6%, white); border: 1px solid color-mix(in srgb, var(--accent, #0e9f6e) 18%, var(--line)); border-radius: 8px; }
+.ck-move-note strong { color: var(--ink); }
+.ck-news-row { padding: 9px 0; border-bottom: 1px solid var(--line-2); }
+.ck-news-row:last-of-type { border-bottom: 0; }
+.ck-news-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 2px; }
+.ck-news-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent, #0e9f6e); }
+.ck-news-tone { font-size: 10px; }
+.ck-news-h { font-size: 12.5px; line-height: 1.45; color: var(--ink); }
+.ck-news-h a { color: inherit; text-decoration: none; }
+.ck-news-h a:hover { text-decoration: underline; }
+.ck-news-src { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+.ck-clear { display: flex; gap: 12px; align-items: center; padding: 6px 0; }
+.ck-clear-ico { width: 28px; height: 28px; border-radius: 8px; color: #fff; display: grid; place-items: center; font-size: 14px; flex: none; }
+.ck-clear strong { display: block; font-size: 13.5px; } .ck-clear span { display: block; font-size: 12px; }
+.ck-breach { border-left: 3px solid; padding: 8px 0 8px 13px; margin-bottom: 8px; }
+.ck-breach.high { border-color: #e02424; } .ck-breach.warn { border-color: #d97706; }
+.ck-breach-top { display: flex; justify-content: space-between; align-items: baseline; }
+.ck-breach-top strong { font-size: 13px; }
+.ck-breach-d { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+.ck-foot { font-size: 11.5px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
+@media (max-width: 920px) { .ck-grid { grid-template-columns: 1fr; } }
+`;
+
+window.Cockpit = Cockpit;

@@ -1,354 +1,430 @@
-// screener.jsx — Market scanner across US / Canada / Crypto. Distinct from Strategy Lab
-// (which proposes trades on YOUR book) — this discovers candidates across a broad universe.
-// Reuses window.signalsFor. Click a row to expand the rationale behind the score & action.
-const { useState: useScrState } = React;
+// reflexion.jsx — Reflexion Ledger (Phase 1a of the autonomy roadmap).
+// The one gap that keeps recurring: signalsFor() is a one-way function — it makes
+// predictions but never reads the outcome journals back in. This module closes that:
+// it derives a predicted-vs-realized ledger from the REAL journals already persisted
+// (Tracker's dated, regime-stamped model books + Papersim's accept/reject decisions),
+// buckets the error by regime / theme / horizon, and exposes window.HelmReflexion so
+// the engine CAN consult its own calibration. Framed micro/meso/macro after SAMULE.
+//
+// Honest scope: this SURFACES calibration and publishes an advisory adjustment(); it
+// does NOT silently mutate the live engine. Wiring an approved adjustment into config
+// is Phase 1b (Learning-Lab loop). Sample sizes are shown so you can trust/distrust it.
+const { useState: useRxState } = React;
 
-const scUP = "#0e9f6e", scDN = "#e02424", scWARN = "#d97706";
-const scMoney = (n) => "$" + (n >= 1000 ? n.toLocaleString("en-US", { maximumFractionDigits: 0 }) : n.toFixed(2));
+const rxUP = "#0e9f6e", rxDN = "#e02424", rxWARN = "#d97706", rxBLUE = "#2563eb";
+const rxPct = (n, dp = 1) => (n == null || isNaN(n) ? "—" : (n >= 0 ? "+" : "−") + Math.abs(n * 100).toFixed(dp) + "%");
+const rxPts = (n, dp = 0) => (n == null || isNaN(n) ? "—" : (n >= 0 ? "+" : "−") + Math.abs(n * 100).toFixed(dp));
+const rxClamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rxMean = (a) => a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0;
+const rxToday = () => new Date().toISOString().slice(0, 10);
 
-// seeded price-path generator (deterministic spark for universe names)
-function scSpark(seed, n = 28) {
-  let s = seed * 9301 + 49297; const rnd = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
-  const drift = (rnd() - 0.45) * 0.9; const out = []; let v = 100;
-  for (let i = 0; i < n; i++) { v = v * (1 + drift / n + (rnd() - 0.5) * 0.05); out.push(v); }
-  return out;
+function rxDaysBetween(dateStr, today) {
+  try { const a = new Date(dateStr + "T00:00:00"), b = new Date(today + "T00:00:00");
+    return Math.max(0, Math.round((b - a) / 86400000)); } catch (e) { return 0; }
 }
-
-// representative liquid universe per market (deterministic scores via hash-based fundamentals)
-const UNIVERSE = [
-  // ---- US ----
-  ["AAPL","Apple","US","Tech",268,0.5],["MSFT","Microsoft","US","Tech",505,0.7],["NVDA","NVIDIA","US","Semiconductors",205,0],
-  ["AMZN","Amazon","US","Consumer",225,0],["GOOGL","Alphabet","US","Tech",195,0],["META","Meta Platforms","US","Tech",720,0.4],
-  ["TSLA","Tesla","US","Consumer",360,0],["AMD","Adv. Micro Devices","US","Semiconductors",165,0],["AVGO","Broadcom","US","Semiconductors",440,1.2],
-  ["NFLX","Netflix","US","Consumer",710,0],["JPM","JPMorgan","US","Financials",215,2.2],["V","Visa","US","Financials",285,0.8],
-  ["UNH","UnitedHealth","US","Healthcare",520,1.5],["XOM","Exxon Mobil","US","Energy",112,3.3],["CVX","Chevron","US","Energy",152,4.1],
-  ["COST","Costco","US","Consumer",890,0.5],["LLY","Eli Lilly","US","Healthcare",780,0.7],["HD","Home Depot","US","Consumer",385,2.4],
-  ["KO","Coca-Cola","US","Consumer",62,3.0],["WMT","Walmart","US","Consumer",78,1.2],
-  ["SOXX","iShares Semiconductor ETF","US","Semiconductors",255,0.6],["PLTR","Palantir","US","Software",78,0],
-  ["ARM","Arm Holdings","US","Semiconductors",148,0],["ARKK","ARK Innovation ETF","US","Innovation",62,0],["COIN","Coinbase","US","Financials",235,0],
-  ["CRM","Salesforce","US","Software",330,0.6],["NOW","ServiceNow","US","Software",1020,0],
-  ["MU","Micron","US","Semiconductors",105,0.4],["MRVL","Marvell","US","Semiconductors",92,0.3],["SNOW","Snowflake","US","Software",185,0],
-  ["UBER","Uber","US","Technology",78,0],["SHOP","Shopify","US","Software",95,0],["ANET","Arista Networks","US","Technology",110,0],
-  ["VST","Vistra","US","Utilities",165,0.6],["CEG","Constellation Energy","US","Utilities",285,0.5],["DELL","Dell Technologies","US","Technology",128,1.5],
-  ["TSM","Taiwan Semi","US","Semiconductors",215,1.2],["ASML","ASML Holding","US","Semiconductors",950,0.9],["PANW","Palo Alto Networks","US","Software",195,0],
-  ["ARKW","ARK Next-Gen Internet","US","Innovation",95,0],["ARKG","ARK Genomic","US","Innovation",28,0],
-  // ---- US: financials / healthcare / industrials / consumer / energy (broadens beyond mega-cap tech) ----
-  ["BAC","Bank of America","US","Financials",48,2.3],["WFC","Wells Fargo","US","Financials",78,2.1],["GS","Goldman Sachs","US","Financials",620,1.8],
-  ["MS","Morgan Stanley","US","Financials",145,1.9],["SCHW","Charles Schwab","US","Financials",92,1.3],["BLK","BlackRock","US","Financials",1080,1.9],
-  ["AXP","American Express","US","Financials",320,1.0],["MA","Mastercard","US","Financials",560,0.5],["PYPL","PayPal","US","Financials",72,0],
-  ["SOFI","SoFi Technologies","US","Financials",14,0],["HOOD","Robinhood","US","Financials",58,0],["AFRM","Affirm","US","Financials",58,0],
-  ["JNJ","Johnson & Johnson","US","Healthcare",162,3.1],["PFE","Pfizer","US","Healthcare",26,6.5],["ABBV","AbbVie","US","Healthcare",192,3.2],
-  ["MRK","Merck","US","Healthcare",92,3.6],["ABT","Abbott Labs","US","Healthcare",118,1.8],["TMO","Thermo Fisher","US","Healthcare",520,0.3],
-  ["DHR","Danaher","US","Healthcare",215,0.5],["ISRG","Intuitive Surgical","US","Healthcare",545,0],["VRTX","Vertex Pharma","US","Healthcare",470,0],["REGN","Regeneron","US","Healthcare",620,0.4],
-  ["CAT","Caterpillar","US","Industrials",395,1.7],["DE","Deere & Co","US","Industrials",425,1.4],["GE","GE Aerospace","US","Industrials",210,0.5],
-  ["HON","Honeywell","US","Industrials",230,1.9],["RTX","RTX Corp","US","Industrials",135,2.0],["LMT","Lockheed Martin","US","Industrials",485,2.6],
-  ["BA","Boeing","US","Industrials",178,0],["UPS","United Parcel Service","US","Industrials",122,5.5],["UNP","Union Pacific","US","Industrials",235,2.2],
-  ["MCD","McDonald's","US","Consumer",295,2.4],["SBUX","Starbucks","US","Consumer",92,2.7],["NKE","Nike","US","Consumer",72,2.1],
-  ["TGT","Target","US","Consumer",132,3.3],["LOW","Lowe's","US","Consumer",245,1.9],["PG","Procter & Gamble","US","Consumer",165,2.4],
-  ["PEP","PepsiCo","US","Consumer",145,3.6],["DIS","Walt Disney","US","Consumer",112,0.9],["BKNG","Booking Holdings","US","Consumer",4950,0.5],
-  ["ABNB","Airbnb","US","Consumer",135,0],["DASH","DoorDash","US","Consumer",185,0],["RIVN","Rivian","US","Consumer",13,0],
-  ["LCID","Lucid Group","US","Consumer",3.2,0],["GM","General Motors","US","Consumer",52,1.0],["F","Ford Motor","US","Consumer",11,4.8],
-  ["CELH","Celsius Holdings","US","Consumer",38,0],["COP","ConocoPhillips","US","Energy",98,3.1],["SLB","Schlumberger","US","Energy",42,2.6],["OXY","Occidental Petroleum","US","Energy",48,1.7],
-  // ---- US: broader tech / semis / software / growth ----
-  ["ORCL","Oracle","US","Software",178,0.8],["IBM","IBM","US","Software",245,2.9],["INTC","Intel","US","Semiconductors",28,1.9],
-  ["QCOM","Qualcomm","US","Semiconductors",165,2.0],["TXN","Texas Instruments","US","Semiconductors",195,2.8],["ADBE","Adobe","US","Software",440,0],
-  ["INTU","Intuit","US","Software",640,0.5],["ADI","Analog Devices","US","Semiconductors",225,1.6],["LRCX","Lam Research","US","Semiconductors",95,0.8],
-  ["KLAC","KLA Corp","US","Semiconductors",720,0.7],["CDNS","Cadence Design","US","Software",305,0],["SNPS","Synopsys","US","Software",480,0],
-  ["DDOG","Datadog","US","Software",130,0],["ZS","Zscaler","US","Software",210,0],["CRWD","CrowdStrike","US","Software",395,0],
-  ["NET","Cloudflare","US","Software",115,0],["MDB","MongoDB","US","Software",240,0],["TEAM","Atlassian","US","Software",210,0],
-  ["RBLX","Roblox","US","Software",68,0],["ROKU","Roku","US","Software",78,0],["RKLB","Rocket Lab","US","Aerospace",28,0],
-  ["IONQ","IonQ","US","Technology",32,0],["NEE","NextEra Energy","US","Utilities",72,2.9],["FSLR","First Solar","US","Utilities",195,0],
-  ["ENPH","Enphase Energy","US","Technology",68,0],["TMUS","T-Mobile US","US","Telecom",235,1.5],["CMCSA","Comcast","US","Telecom",38,3.4],
-  // ---- Canada (.TO) ----
-  ["RY.TO","Royal Bank","CA","Financials",168,3.6],["TD.TO","TD Bank","CA","Financials",82,5.1],["ENB.TO","Enbridge","CA","Energy",58,6.5],
-  ["CNQ.TO","Cdn Natural Res","CA","Energy",47,4.4],["SHOP.TO","Shopify","CA","Tech",145,0],["BNS.TO","Scotiabank","CA","Financials",70,6.0],
-  ["BMO.TO","Bank of Montreal","CA","Financials",128,4.8],["CP.TO","Cdn Pacific Kansas","CA","Industrials",108,0.7],["CNR.TO","Cdn National Rail","CA","Industrials",148,2.2],
-  ["SU.TO","Suncor Energy","CA","Energy",54,4.0],["ATD.TO","Couche-Tard","CA","Consumer",78,0.9],["BCE.TO","BCE","CA","Telecom",38,8.5],
-  ["NTR.TO","Nutrien","CA","Materials",68,4.3],["CSU.TO","Constellation Sw","CA","Tech",4200,0.1],["FNV.TO","Franco-Nevada","CA","Materials",185,1.1],
-  ["HPS-A.TO","Hammond Power Solutions","CA","Industrials",128,0.7],["CLS.TO","Celestica","CA","Technology",185,0],["WSP.TO","WSP Global","CA","Industrials",265,0.6],
-  // ---- Canada (.TO): broader TSX coverage — financials, energy, industrials, staples ----
-  ["GIB-A.TO","CGI Inc","CA","Software",165,0],["L.TO","Loblaw Companies","CA","Consumer",215,1.0],["DOL.TO","Dollarama","CA","Consumer",145,0.3],
-  ["MG.TO","Magna International","CA","Consumer",62,4.5],["TRP.TO","TC Energy","CA","Energy",68,4.9],["PPL.TO","Pembina Pipeline","CA","Energy",52,5.2],
-  ["ABX.TO","Barrick Mining","CA","Materials",28,2.1],["K.TO","Kinross Gold","CA","Materials",18,1.1],["WCN.TO","Waste Connections","CA","Industrials",245,0.6],
-  ["TIH.TO","Toromont Industries","CA","Industrials",128,1.2],["TFII.TO","TFI International","CA","Industrials",125,1.3],["MFC.TO","Manulife Financial","CA","Financials",42,3.9],
-  ["SLF.TO","Sun Life Financial","CA","Financials",84,3.9],["IFC.TO","Intact Financial","CA","Financials",255,1.7],["POW.TO","Power Corp of Canada","CA","Financials",56,4.2],
-  ["QSR.TO","Restaurant Brands Intl","CA","Consumer",92,3.4],["CTC-A.TO","Canadian Tire","CA","Consumer",165,3.9],["SAP.TO","Saputo","CA","Consumer",28,2.4],
-  ["IMO.TO","Imperial Oil","CA","Energy",108,2.2],["OVV.TO","Ovintiv","CA","Energy",58,2.6],["TOU.TO","Tourmaline Oil","CA","Energy",68,3.1],
-  ["ARX.TO","ARC Resources","CA","Energy",28,2.7],["NPI.TO","Northland Power","CA","Utilities",24,4.8],["BEP-UN.TO","Brookfield Renewable","CA","Utilities",32,5.6],
-  ["BAM.TO","Brookfield Asset Mgmt","CA","Financials",68,3.0],["BN.TO","Brookfield Corp","CA","Financials",78,0.5],["DOO.TO","BRP Inc","CA","Consumer",78,2.3],
-  ["CCL-B.TO","CCL Industries","CA","Materials",78,1.3],["STN.TO","Stantec","CA","Industrials",135,0.6],["GFL.TO","GFL Environmental","CA","Industrials",58,0.2],
-  // ---- Crypto ----
-  ["BTC","Bitcoin","Crypto","Crypto",61000,0],["ETH","Ethereum","Crypto","Crypto",2950,0],["SOL","Solana","Crypto","Crypto",69,0],
-  ["XRP","XRP","Crypto","Crypto",1.14,0],["BNB","BNB","Crypto","Crypto",595,0],["ADA","Cardano","Crypto","Crypto",0.62,0],
-  ["DOGE","Dogecoin","Crypto","Crypto",0.083,0],["LINK","Chainlink","Crypto","Crypto",7.9,0],["AVAX","Avalanche","Crypto","Crypto",24,0],
-  ["DOT","Polkadot","Crypto","Crypto",4.2,0],["SUI","Sui","Crypto","Crypto",0.72,0],["TRX","TRON","Crypto","Crypto",0.32,0],
-  ["LTC","Litecoin","Crypto","Crypto",118,0],["NEAR","NEAR Protocol","Crypto","Crypto",5.8,0],["ATOM","Cosmos","Crypto","Crypto",8.5,0],["APT","Aptos","Crypto","Crypto",9.2,0],
-  // ---- Canada ETFs (.TO) · curated liquid, Nov-2025 NBC ETF directory ----
-  ["VFV.TO","Vanguard S&P 500 Index","CA-ETF","US Equity",148,1.2],["ZSP.TO","BMO S&P 500 Index","CA-ETF","US Equity",94,1.1],
-  ["XIC.TO","iShares Core S&P/TSX Composite","CA-ETF","CA Equity",48,2.3],["XIU.TO","iShares S&P/TSX 60","CA-ETF","CA Equity",45,2.5],
-  ["XEF.TO","iShares Core MSCI EAFE IMI","CA-ETF","Intl Equity",37,2.9],["ZCN.TO","BMO S&P/TSX Capped Composite","CA-ETF","CA Equity",38,2.6],
-  ["ZAG.TO","BMO Aggregate Bond Index","CA-ETF","Fixed Income",14,3.4],["VCN.TO","Vanguard FTSE Canada All Cap","CA-ETF","CA Equity",52,2.5],
-  ["ZEA.TO","BMO MSCI EAFE Index","CA-ETF","Intl Equity",24,2.8],["XUS.TO","iShares Core S&P 500","CA-ETF","US Equity",58,1.2],
-  ["HXT.TO","Global X S&P/TSX 60","CA-ETF","CA Equity",75,0],["VDY.TO","Vanguard FTSE Cdn Hi-Div Yield","CA-ETF","CA Dividend",46,4.2],
-  ["XEI.TO","iShares S&P/TSX Comp High Div","CA-ETF","CA Dividend",30,4.8],["XDV.TO","iShares Cdn Select Dividend","CA-ETF","CA Dividend",33,4.4],
-  ["ZLB.TO","BMO Low Vol Canadian Equity","CA-ETF","CA Low Vol",48,2.3],["ZWB.TO","BMO Covered Call Cdn Banks","CA-ETF","Covered Call",19,7.1],
-  ["ZWC.TO","BMO CA High Div Covered Call","CA-ETF","Covered Call",18,7.4],["VGRO.TO","Vanguard Growth ETF Portfolio","CA-ETF","Asset Alloc",36,1.9],
-  ["VBAL.TO","Vanguard Balanced ETF Portfolio","CA-ETF","Asset Alloc",32,2.2],["XBAL.TO","iShares Core Balanced ETF","CA-ETF","Asset Alloc",31,2.3],
-  ["XEG.TO","iShares S&P/TSX Capped Energy","CA-ETF","CA Energy",18,3.1],["ZUB.TO","BMO Equal Weight US Banks Hgd","CA-ETF","US Financials",36,2.0],
-  ["BTCC.TO","Purpose Bitcoin ETF","CA-ETF","Crypto",12,0],["ETHX.B.TO","CI Galaxy Ethereum","CA-ETF","Crypto",18,0],
-  // ---- US ETFs · curated liquid, Nov-2025 NBC ETF directory ----
-  ["SPY","SPDR S&P 500 Trust","US-ETF","US Equity",595,1.2],["IVV","iShares Core S&P 500","US-ETF","US Equity",598,1.3],
-  ["VTI","Vanguard Total Stock Market","US-ETF","US Equity",295,1.3],["QQQ","Invesco QQQ Trust","US-ETF","US Tech",515,0.6],
-  ["VEA","Vanguard FTSE Developed Mkts","US-ETF","Intl Equity",52,3.0],["VTV","Vanguard Value","US-ETF","US Value",172,2.1],
-  ["BND","Vanguard Total Bond Market","US-ETF","Fixed Income",73,3.6],["GLD","SPDR Gold Shares","US-ETF","Gold",245,0],
-  ["IWF","iShares Russell 1000 Growth","US-ETF","US Growth",420,0.5],["VGT","Vanguard Info Technology","US-ETF","US Tech",615,0.6],
-  ["VIG","Vanguard Dividend Appreciation","US-ETF","US Dividend",200,1.7],["IJH","iShares Core S&P Mid-Cap","US-ETF","US Mid Cap",325,1.2],
-  ["XLK","Technology Select Sector SPDR","US-ETF","US Tech",240,0.6],["IJR","iShares Core S&P Small-Cap","US-ETF","US Small Cap",120,1.4],
-  ["IBIT","iShares Bitcoin Trust","US-ETF","Crypto",58,0],["RSP","Invesco S&P 500 Equal Weight","US-ETF","US Equity",185,1.5],
-  ["IWM","iShares Russell 2000","US-ETF","US Small Cap",235,1.2],["IWD","iShares Russell 1000 Value","US-ETF","US Value",195,1.9],
-  ["TLT","iShares 20+ Year Treasury","US-ETF","Fixed Income",92,4.0],["XLF","Financial Select Sector SPDR","US-ETF","US Financials",50,1.5],
-  ["IAU","iShares Gold Trust","US-ETF","Gold",50,0],["VT","Vanguard Total World Stock","US-ETF","Global Equity",125,1.9],
-  ["JEPI","JPMorgan Equity Premium Income","US-ETF","Covered Call",58,7.2],["XLV","Health Care Select Sector SPDR","US-ETF","US Healthcare",148,1.6],
-  ["SMH","VanEck Semiconductor","US-ETF","US Semis",265,0.5],["SCHD","Schwab US Dividend Equity","US-ETF","US Dividend",28,3.5],
-  ["IEF","iShares 7-10 Year Treasury","US-ETF","Fixed Income",95,3.5],["LQD","iShares iBoxx IG Corp Bond","US-ETF","Fixed Income",110,4.2],
-  ["DIA","SPDR Dow Jones Industrial","US-ETF","US Equity",445,1.6],["VB","Vanguard Small-Cap","US-ETF","US Small Cap",245,1.3],
-].map(([ticker, name, market, sector, price, divYield], i) => ({ ticker, name, market, sector, price, divYield, spark: scSpark(i + 7) }));
-
-function durationOf(sig) {
-  if (sig.action === "Sell") return { k: "Exit now", band: "now" };
-  if (sig.rsi < 32 || sig.rsi > 70) return { k: "Days", band: "day" };
-  if (sig.trendScore >= 60 && sig.mom >= 55) return { k: "Weeks", band: "week" };
-  if (sig.valueScore >= 60 && sig.qualityScore >= 55) return { k: "Years", band: "year" };
-  if (sig.valueScore >= 55) return { k: "Months", band: "month" };
-  return { k: "Weeks", band: "week" };
-}
-const durColor = { now: scDN, day: scWARN, week: "#0891b2", month: "#4f46e5", year: scUP };
-
-function scrRationale(h, sig, d, rr) {
-  const bits = [];
-  bits.push({ k: "Trend / momentum", v: sig.trendScore, why: sig.mom >= 55 ? "uptrend intact" : sig.mom < 42 ? "broken trend — knife risk" : "flat/range" });
-  bits.push({ k: "Valuation", v: sig.valueScore, why: sig.valueScore >= 60 ? "attractively valued" : sig.valueScore <= 40 ? "rich" : "fair" });
-  bits.push({ k: "Quality", v: sig.qualityScore, why: sig.qualityScore >= 60 ? "high quality" : sig.qualityScore <= 40 ? "low quality" : "average" });
-  bits.push({ k: "Mean-reversion (RSI)", v: sig.revScore, why: sig.rsi > 70 ? `overbought ${sig.rsi.toFixed(0)}` : sig.rsi < 32 ? `oversold ${sig.rsi.toFixed(0)}` : `neutral ${sig.rsi.toFixed(0)}` });
-  if ((h.divYield || 0) >= 1) bits.push({ k: "Income", v: sig.incomeScore, why: `${h.divYield}% yield` });
-  const reg = window.HelmRegime;
-  let actionWhy;
-  if (sig.action === "Buy") actionWhy = `Composite ${sig.composite} ≥ buy bar with a confirmed trend${sig.rsi < 32 ? " and oversold bounce setup" : ""}.`;
-  else if (sig.action === "Sell") actionWhy = sig.sellKind === "Exit" ? `Composite ${sig.composite} is weak or the trend has broken — full exit.` : `Overbought/extended — trim into strength, keep a core.`;
-  else actionWhy = `Composite ${sig.composite} is in the hold band — no edge either way right now.`;
-  const regWhy = reg ? `Regime ${reg.label} (${reg.bias}) ${/Risk-on|Constructive/.test(reg.bias) ? "supports" : /Risk-off|Defensive/.test(reg.bias) ? "works against" : "is neutral to"} this long.` : "Regime not classified — open Macro → Economic CIO.";
-  return { bits, actionWhy, regWhy };
-}
-
-const SORTS = [["score", "Score"], ["conf", "Confidence"], ["rr", "R:R"], ["rsi", "RSI"], ["ticker", "Symbol"]];
-
-function Screener({ accent }) {
+function rxSecOf(ticker) {
   const D = window.PMData;
-  const [risk, setRisk] = useScrState("balanced");
-  const [market, setMarket] = useScrState("US");
-  const [filter, setFilter] = useScrState("all");
-  const [durF, setDurF] = useScrState("any");
-  const [sort, setSort] = useScrState("score");
-  const [asc, setAsc] = useScrState(false);
-  const [openTkr, setOpenTkr] = useScrState(null);
-  const cfg = (window.helmPresetCfg || (() => ({ weights: { trend: 35, value: 20, reversion: 25, income: 20 }, buyBar: 62, sellBar: 40, rsiOver: 72, rsiUnder: 30, stopMult: 1, maxPos: 12 })))(risk);
+  const h = (D && D.allHoldings || []).find((x) => x.ticker === ticker);
+  if (h && h.sector) return h.sector;
+  const u = (window.HelmUniverse || []).find((x) => x.ticker === ticker);
+  return u && u.sector ? u.sector : "Other";
+}
+function rxPriceOf(ticker) {
+  const D = window.PMData;
+  const h = (D && D.allHoldings || []).find((x) => x.ticker === ticker);
+  if (h && h.price) return h.price;
+  const u = (window.HelmUniverse || []).find((x) => x.ticker === ticker);
+  return u && u.price ? u.price : null;
+}
+// weight (conviction share, ~0.05–0.3) → a probability-like confidence, ONLY as a
+// fallback when the snapshot predates entry-time composite storage.
+function rxConfFromWeight(w) { return rxClamp(0.5 + (w || 0.1), 0.5, 0.85); }
 
-  if (!window.signalsFor) return <div className="pm-empty">Screener needs the Strategy model — open Strategy Lab once, then return.</div>;
+function rxLoad(key) { try { return JSON.parse(localStorage.getItem(key) || "null"); } catch (e) { return null; } }
 
-  const heldSet = new Set(D.allHoldings.map((h) => h.ticker));
-  let universe = UNIVERSE.filter((u) => market === "all" ? true : u.market === market)
-    .map((u) => ({ ...u, held: heldSet.has(u.ticker) }));
+// ---- build the ledger from the persisted journals -------------------------
+function buildRecords() {
+  const today = rxToday();
+  const recs = [];
 
-  const rows = universe.map((h) => {
-    const sig = window.signalsFor(h, cfg);
-    const d = durationOf(sig);
-    const rr = (sig.target - h.price) / Math.max(0.0001, h.price - sig.stop);
-    return { h, sig, d, rr };
+  // 1) Tracker journal — each dated snapshot carries every model's full book (entry
+  //    prices) + the regime that was live. Each pick = a Buy prediction we can mark.
+  const journal = rxLoad("helm_tracker_journal_v1") || [];
+  journal.forEach((e) => {
+    const models = (e.models && e.models.length) ? e.models
+      : (e.picks ? [{ name: e.champion || "Champion", picks: e.picks }] : []);
+    const age = rxDaysBetween(e.date, today);
+    models.forEach((m) => (m.picks || []).forEach((p) => {
+      const now = rxPriceOf(p.t);
+      if (!now || !p.entry) return;
+      const realized = now / p.entry - 1;
+      const conf = p.c != null ? rxClamp(p.c / 100, 0, 1) : rxConfFromWeight(p.w);
+      recs.push({
+        src: "tracker", date: e.date, ticker: p.t, sector: rxSecOf(p.t),
+        regime: e.regime || null, model: m.name, action: "Buy",
+        conf, entry: p.entry, now, realized, ageDays: age, hit: realized > 0,
+        // scorable only if it's aged AND the price actually moved — a name marked to an
+        // unchanged (static/seed) price hasn't resolved, it's just uncovered by the feed.
+        resolved: age >= 2 && Math.abs(realized) >= 0.002,
+      });
+    }));
   });
 
-  let shown = rows.filter(({ h, sig, d }) => {
-    if (filter === "buy" && sig.action !== "Buy") return false;
-    if (filter === "held" && !h.held) return false;
-    if (durF !== "any" && d.band !== durF) return false;
-    return true;
+  // 2) Papersim decision log — YOUR accept/reject overlay on the model. Accept = a Buy
+  //    (should go up); Reject = you passed (a "win" only if the name did NOT run away).
+  const ps = rxLoad("helm_papersim_v1");
+  if (ps && Array.isArray(ps.log)) {
+    ps.log.forEach((l) => {
+      if (l.kind !== "accept" && l.kind !== "reject") return;
+      const now = rxPriceOf(l.ticker);
+      const entry = l.price || l.entryRef;
+      if (!now || !entry) return;
+      const realized = now / entry - 1;
+      const conf = l.score != null ? rxClamp(l.score / 100, 0, 1) : 0.6;
+      const age = rxDaysBetween(l.date, today);
+      recs.push({
+        src: "papersim", date: l.date, ticker: l.ticker, sector: rxSecOf(l.ticker),
+        regime: l.regime || null, model: "Your judgment",
+        action: l.kind === "accept" ? "Accept" : "Reject",
+        conf, entry, now, realized, ageDays: age,
+        hit: l.kind === "accept" ? realized > 0 : realized <= 0.05,
+        resolved: age >= 2 && Math.abs(realized) >= 0.002,
+      });
+    });
+  }
+  return recs;
+}
+
+function rxBucketize(records, keyFn) {
+  const b = {};
+  records.forEach((r) => { const k = keyFn(r); if (k == null) return; (b[k] = b[k] || []).push(r); });
+  const out = [];
+  Object.keys(b).forEach((k) => {
+    const rs = b[k], n = rs.length;
+    const hitRate = rs.filter((r) => r.hit).length / n;
+    const avgReal = rxMean(rs.map((r) => r.realized));
+    const meanConf = rxMean(rs.map((r) => r.conf));
+    out.push({ key: k, n, hitRate, avgReal, meanConf, evError: meanConf - hitRate });
   });
-  const key = (r) => sort === "score" ? r.sig.composite : sort === "conf" ? r.sig.conf : sort === "rr" ? r.rr : sort === "rsi" ? r.sig.rsi : r.h.ticker;
-  shown.sort((a, b) => { const ka = key(a), kb = key(b); const cmp = typeof ka === "string" ? ka.localeCompare(kb) : ka - kb; return asc ? cmp : -cmp; });
+  return out.sort((a, b2) => b2.n - a.n);
+}
 
-  const clickSort = (k) => { if (sort === k) setAsc((v) => !v); else { setSort(k); setAsc(k === "ticker" || k === "rsi"); } };
-  const actTag = (sig) => sig.action === "Buy" ? ["Buy", scUP] : sig.action === "Sell" ? (sig.sellKind === "Exit" ? ["Exit", scDN] : ["Trim", scWARN]) : ["Hold", "var(--muted)"];
-  const buys = rows.filter((r) => r.sig.action === "Buy").length;
-  const arrow = (k) => sort === k ? (asc ? " ▲" : " ▼") : "";
-  const MARKETS = [["US", "US"], ["CA", "Canada"], ["Crypto", "Crypto"], ["all", "All"]];
+const RX_AGE_BANDS = [
+  ["T+1 · ≤3d", (d) => d <= 3],
+  ["1wk · ≤10d", (d) => d <= 10],
+  ["1mo · ≤35d", (d) => d <= 35],
+  ["3mo · ≤100d", (d) => d <= 100],
+  [">3mo", () => true],
+];
+function rxAgeBand(d) { for (const [lbl, test] of RX_AGE_BANDS) if (test(d)) return lbl; return ">3mo"; }
 
+// ---- the single compute the panel AND the engine-facing API both use ------
+let _rxCache = null, _rxCacheAt = 0;
+function computeReflexion(force) {
+  const now = Date.now();
+  if (!force && _rxCache && (now - _rxCacheAt) < 20000) return _rxCache;
+  const all = buildRecords();
+  const resolved = all.filter((r) => r.resolved);
+  const scored = resolved; // score ONLY resolved calls — never dilute with unmoved/unaged names
+
+  const summary = {
+    nTotal: all.length, nResolved: resolved.length,
+    hitRate: scored.length ? scored.filter((r) => r.hit).length / scored.length : null,
+    meanConf: scored.length ? rxMean(scored.map((r) => r.conf)) : null,
+    avgReal: scored.length ? rxMean(scored.map((r) => r.realized)) : null,
+  };
+  summary.evError = (summary.meanConf != null && summary.hitRate != null) ? summary.meanConf - summary.hitRate : null;
+
+  // drift: recent half vs older half hit-rate (macro-level domain drift signal)
+  let drift = null;
+  if (scored.length >= 8) {
+    const byDate = [...scored].sort((a, b) => (a.date < b.date ? -1 : 1));
+    const half = Math.floor(byDate.length / 2);
+    const older = byDate.slice(0, half), recent = byDate.slice(half);
+    const hOld = older.filter((r) => r.hit).length / older.length;
+    const hNew = recent.filter((r) => r.hit).length / recent.length;
+    drift = { old: hOld, recent: hNew, delta: hNew - hOld };
+  }
+
+  const byRegime = rxBucketize(scored.filter((r) => r.regime), (r) => r.regime);
+  const byTheme = rxBucketize(scored, (r) => r.sector);
+  const byHorizon = rxBucketize(scored, (r) => rxAgeBand(r.ageDays));
+  const byModel = rxBucketize(scored, (r) => r.model);
+  const byAction = rxBucketize(scored, (r) => r.action);
+
+  // calibration bands: predicted-confidence vs realized hit-frequency
+  const bands = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 1.01]];
+  const calibration = bands.map(([lo, hi]) => {
+    const rs = scored.filter((r) => r.conf >= lo && r.conf < hi);
+    return { lo, hi, n: rs.length,
+      predicted: rs.length ? rxMean(rs.map((r) => r.conf)) : null,
+      realized: rs.length ? rs.filter((r) => r.hit).length / rs.length : null };
+  });
+
+  // meso: the worst systematically-overconfident bucket with a real sample
+  const meso = [...byRegime.filter((b) => b.n >= 6), ...byTheme.filter((b) => b.n >= 6)]
+    .sort((a, b) => b.evError - a.evError)[0] || null;
+
+  const micro = [...scored].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 14);
+
+  _rxCache = { all, scored, summary, drift, byRegime, byTheme, byHorizon, byModel, byAction, calibration, meso, micro };
+  _rxCacheAt = now;
+  return _rxCache;
+}
+
+// engine-facing: advisory confidence multiplier for a (regime, sector) — the "read the
+// journal back in" hook. Returns 1 when we don't have enough evidence. NOT auto-applied.
+function reflexionAdjustment(regime, sector) {
+  const c = computeReflexion();
+  let mult = 1, why = [];
+  const rr = c.byRegime.find((b) => b.key === regime);
+  const tt = c.byTheme.find((b) => b.key === sector);
+  if (rr && rr.n >= 8) { const d = rxClamp(rr.evError, -0.25, 0.25); mult *= 1 - d * 0.5;
+    if (Math.abs(d) > 0.06) why.push(`${regime}: ${d > 0 ? "over" : "under"}confident (${rr.n})`); }
+  if (tt && tt.n >= 8) { const d = rxClamp(tt.evError, -0.25, 0.25); mult *= 1 - d * 0.5;
+    if (Math.abs(d) > 0.06) why.push(`${sector}: ${d > 0 ? "over" : "under"}confident (${tt.n})`); }
+  return { mult: rxClamp(mult, 0.7, 1.2), why };
+}
+
+window.HelmReflexion = { compute: computeReflexion, adjustment: reflexionAdjustment, buildRecords };
+
+// ---------------------------------------------------------------------------
+function RxBar({ value, mid, color }) {
+  // value 0..1; a vertical mid marker (e.g. 0.5 coin-flip line)
   return (
-    <div className="scr">
-      <style>{SCREENER_CSS}</style>
-      <section className="pm-card scr-head">
-        <div>
-          <div className="pm-card-eyebrow">Screener · {universe.length} names · {market === "all" ? "all markets" : market}</div>
-          <div className="scr-sub">Scans a broad universe by the model — opportunity score, confidence, TP/SL, reward:risk and expected duration. <strong style={{ color: scUP }}>{buys} buys</strong> at the {risk} preset. Click any row for the rationale.</div>
-        </div>
-        <div className="scr-risk">
-          {["conservative", "balanced", "aggressive"].map((r) => (
-            <button key={r} className={risk === r ? "on" : ""} onClick={() => setRisk(r)} style={risk === r ? { borderColor: accent, color: accent } : {}}>{r[0].toUpperCase() + r.slice(1)}</button>
-          ))}
-        </div>
-      </section>
-
-      <section className="pm-card">
-        <div className="scr-filters">
-          <div className="scr-fgroup">
-            <span className="scr-flabel">Market</span>
-            {MARKETS.map(([k, l]) => (
-              <button key={k} className={`scr-chip${market === k ? " on" : ""}`} onClick={() => setMarket(k)} style={market === k ? { background: accent, borderColor: accent, color: "#fff" } : {}}>{l}</button>
-            ))}
-          </div>
-          <div className="scr-fgroup">
-            <span className="scr-flabel">Show</span>
-            {[["all", "All"], ["buy", "Buys"], ["held", "Held"]].map(([k, l]) => (
-              <button key={k} className={`scr-chip${filter === k ? " on" : ""}`} onClick={() => setFilter(k)} style={filter === k ? { background: accent, borderColor: accent, color: "#fff" } : {}}>{l}</button>
-            ))}
-          </div>
-          <div className="scr-fgroup">
-            <span className="scr-flabel">Duration</span>
-            {[["any", "Any"], ["day", "Days"], ["week", "Weeks"], ["month", "Months"], ["year", "Years"]].map(([k, l]) => (
-              <button key={k} className={`scr-chip${durF === k ? " on" : ""}`} onClick={() => setDurF(k)} style={durF === k ? { background: accent, borderColor: accent, color: "#fff" } : {}}>{l}</button>
-            ))}
-          </div>
-        </div>
-
-        <div className="pm-table-wrap">
-          <table className="pm-table scr-table">
-            <thead><tr>
-              <th className="ta-left scr-sortable" onClick={() => clickSort("ticker")}>Symbol{arrow("ticker")}</th>
-              <th className="ta-center">Action</th>
-              <th className="ta-right scr-sortable" onClick={() => clickSort("score")}>Score{arrow("score")}</th>
-              <th className="ta-right scr-sortable" onClick={() => clickSort("conf")}>Conf.{arrow("conf")}</th>
-              <th className="ta-right scr-sortable" onClick={() => clickSort("rsi")}>RSI{arrow("rsi")}</th>
-              <th className="ta-right">Price</th>
-              <th className="ta-right">SL</th>
-              <th className="ta-right">TP</th>
-              <th className="ta-right scr-sortable" onClick={() => clickSort("rr")}>R:R{arrow("rr")}</th>
-              <th className="ta-center">Duration</th>
-            </tr></thead>
-            <tbody>
-              {shown.map(({ h, sig, d, rr }) => {
-                const [al, ac] = actTag(sig);
-                const open = openTkr === h.ticker;
-                const rat = open ? scrRationale(h, sig, d, rr) : null;
-                return (
-                  <React.Fragment key={h.ticker}>
-                    <tr className={`scr-row${open ? " open" : ""}`} onClick={() => setOpenTkr(open ? null : h.ticker)}>
-                      <td className="ta-left">
-                        <div className="pm-sym">
-                          <div className="pm-sym-badge" style={{ background: accent + "1a", color: accent }}>{h.ticker.replace(".TO", "").slice(0, 3)}</div>
-                          <div><div className="pm-sym-tkr">{h.ticker}{h.held ? <span className="scr-held">held</span> : null}<span className="scr-caret">{open ? "▾" : "▸"}</span></div><div className="pm-sym-name">{h.name} · {h.sector}</div></div>
-                        </div>
-                      </td>
-                      <td className="ta-center"><span className="scr-act" style={{ color: ac, background: ac === "var(--muted)" ? "var(--line-2)" : ac + "1a" }}>{al}</span></td>
-                      <td className="ta-right mono" style={{ fontWeight: 700, color: sig.composite >= 60 ? scUP : sig.composite <= 40 ? scDN : scWARN }}>{sig.composite}</td>
-                      <td className="ta-right mono" style={{ color: "var(--ink-2)" }}>{sig.conf.toFixed(0)}</td>
-                      <td className="ta-right mono" style={{ color: sig.rsi > 70 ? scDN : sig.rsi < 32 ? scWARN : "var(--ink-2)" }}>{sig.rsi.toFixed(0)}</td>
-                      <td className="ta-right mono">{scMoney(h.price)}</td>
-                      <td className="ta-right mono" style={{ color: scDN }}>{scMoney(sig.stop)}</td>
-                      <td className="ta-right mono" style={{ color: scUP }}>{scMoney(sig.target)}</td>
-                      <td className="ta-right mono" style={{ color: rr >= 2 ? scUP : rr >= 1 ? scWARN : scDN }}>{rr > 0 ? rr.toFixed(1) : "—"}</td>
-                      <td className="ta-center"><span className="scr-dur" style={{ color: durColor[d.band], background: durColor[d.band] + "16" }}>{d.k}</span></td>
-                    </tr>
-                    {open && (
-                      <tr className="scr-detail-row"><td colSpan={10}>
-                        <div className="scr-detail">
-                          <div className="scr-det-l">
-                            <div className="scr-det-h">Why score {sig.composite} · {al}</div>
-                            <p className="scr-det-action">{rat.actionWhy}</p>
-                            <p className="scr-det-reg">{rat.regWhy}</p>
-                            <div className="scr-det-meta">
-                              <span>Confidence <strong>{sig.conf.toFixed(0)}</strong>/100 <em>(driven by quality)</em></span>
-                              <span>Reward:risk <strong>{rr > 0 ? rr.toFixed(1) : "—"}</strong></span>
-                              <span>Expected hold <strong>{d.k}</strong></span>
-                              {window.helmTradeHorizon ? (() => { const th = window.helmTradeHorizon(sig); return <span title={th.note}>Natural horizon <strong style={{ color: th.kind === "core" ? scUP : th.kind === "quick" ? scWARN : "var(--ink)" }}>{th.tag}</strong></span>; })() : null}
-                            </div>
-                            {sig.action !== "Hold" && window.TradeButton && (() => {
-                              const heldH = window.PMData.allHoldings.find((x) => x.ticker === h.ticker);
-                              return <window.TradeButton
-                                label={sig.action === "Buy" ? "Log buy" : (sig.sellKind === "Exit" ? "Log exit" : "Log trim")}
-                                ticker={h.ticker} side={sig.action === "Buy" ? "buy" : "sell"}
-                                acctHint={heldH ? heldH.acct : undefined}
-                                source="Screener" fullSell={sig.sellKind === "Exit"} small
-                                style={{ marginTop: 10 }} />;
-                            })()}
-                          </div>
-                          <div className="scr-det-r">
-                            <div className="scr-det-h">Score breakdown</div>
-                            {rat.bits.map((b) => (
-                              <div className="scr-bit" key={b.k}>
-                                <span className="scr-bit-k">{b.k}</span>
-                                <span className="scr-bit-bar"><i style={{ width: b.v + "%", background: b.v >= 60 ? scUP : b.v <= 40 ? scDN : scWARN }} /></span>
-                                <span className="scr-bit-v mono">{Math.round(b.v)}</span>
-                                <span className="scr-bit-why">{b.why}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </td></tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        {shown.length === 0 && <div className="pm-empty">No names match these filters.</div>}
-        <div className="scr-foot"><strong>Score</strong> = opportunity (trend/value/quality/reversion/income) — <em>not</em> confidence, which is a separate column. Universe is a representative liquid set per market (not every listing); prices are static reference quotes. TP/SL scale with volatility &amp; the {risk} preset. Research only.</div>
-      </section>
+    <div className="rx-bar">
+      <i style={{ width: rxClamp(value, 0, 1) * 100 + "%", background: color }} />
+      {mid != null && <span className="rx-bar-mid" style={{ left: mid * 100 + "%" }} />}
     </div>
   );
 }
 
-const SCREENER_CSS = `
-.scr { display: flex; flex-direction: column; gap: 16px; }
-.scr-head { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
-.scr-sub { font-size: 12.5px; color: var(--muted); margin-top: 3px; line-height: 1.5; max-width: 760px; }
-.scr-sub strong { color: var(--ink); }
-.scr-risk { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; flex: none; }
-.scr-risk button { font: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 14px; border: 0; border-right: 1px solid var(--line); background: var(--panel-2); color: var(--ink-2); cursor: pointer; }
-.scr-risk button:last-child { border-right: 0; }
-.scr-risk button.on { background: #fff; }
-.scr-filters { display: flex; align-items: center; gap: 22px 28px; flex-wrap: wrap; margin-bottom: 14px; }
-.scr-fgroup { display: flex; align-items: center; gap: 6px; }
-.scr-flabel { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-right: 2px; }
-.scr-chip { font: inherit; font-size: 12px; padding: 5px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); color: var(--ink-2); cursor: pointer; }
-.scr-chip:hover { border-color: var(--muted); }
-.scr-table td, .scr-table th { padding: 10px 11px; }
-.scr-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
-.scr-sortable:hover { color: var(--ink); }
-.scr-row { cursor: pointer; }
-.scr-row:hover { background: var(--panel-2); }
-.scr-row.open { background: color-mix(in srgb, var(--accent, #0e9f6e) 6%, #fff); }
-.scr-caret { font-size: 10px; color: var(--muted); margin-left: 6px; }
-.scr-act { font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 6px; }
-.scr-dur { font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 6px; }
-.scr-held { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); background: var(--line-2); padding: 1px 5px; border-radius: 4px; margin-left: 6px; vertical-align: middle; }
-.scr-detail-row td { padding: 0 !important; background: color-mix(in srgb, var(--accent, #0e9f6e) 4%, #fff); }
-.scr-detail { display: grid; grid-template-columns: 1fr 1.2fr; gap: 26px; padding: 16px 18px; }
-.scr-det-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 8px; }
-.scr-det-action { font-size: 13px; color: var(--ink); line-height: 1.5; }
-.scr-det-reg { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; margin-top: 6px; }
-.scr-det-meta { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px; font-size: 12px; color: var(--ink-2); }
-.scr-det-meta strong { color: var(--ink); }
-.scr-det-meta em { font-style: normal; color: var(--muted); font-size: 11px; }
-.scr-bit { display: grid; grid-template-columns: 1.4fr 1.4fr 0.4fr 1.4fr; gap: 10px; align-items: center; padding: 5px 0; font-size: 12px; }
-.scr-bit-k { color: var(--ink-2); }
-.scr-bit-bar { height: 7px; background: var(--line-2); border-radius: 5px; overflow: hidden; }
-.scr-bit-bar i { display: block; height: 100%; border-radius: 5px; }
-.scr-bit-v { text-align: right; font-size: 11.5px; font-weight: 600; }
-.scr-bit-why { color: var(--muted); font-size: 11px; }
-.scr-foot { font-size: 11.5px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
-.scr-foot strong { color: var(--ink-2); } .scr-foot em { font-style: italic; }
-@media (max-width: 820px) { .scr-head { flex-direction: column; align-items: flex-start; } .scr-detail { grid-template-columns: 1fr; gap: 16px; } }
+function RxBucketTable({ title, sub, rows, accent }) {
+  if (!rows || !rows.length) return null;
+  return (
+    <div className="rx-bt">
+      <div className="rx-bt-head"><strong>{title}</strong><span>{sub}</span></div>
+      <div className="rx-bt-rowh"><span>Bucket</span><span className="ta-r">n</span><span className="ta-r">Hit</span><span className="ta-r">Avg P&amp;L</span><span>Calibration (conf vs hit)</span></div>
+      {rows.map((b) => {
+        const over = b.evError > 0.06, under = b.evError < -0.06;
+        const col = over ? rxWARN : under ? rxBLUE : rxUP;
+        return (
+          <div className="rx-bt-row" key={b.key}>
+            <span className="rx-bt-k">{b.key}</span>
+            <span className="ta-r mono" style={{ color: b.n < 6 ? "var(--muted)" : "var(--ink)" }}>{b.n}</span>
+            <span className="ta-r mono" style={{ color: b.hitRate >= 0.5 ? rxUP : rxDN }}>{Math.round(b.hitRate * 100)}%</span>
+            <span className="ta-r mono" style={{ color: b.avgReal >= 0 ? rxUP : rxDN }}>{rxPct(b.avgReal)}</span>
+            <div className="rx-cal">
+              <RxBar value={b.hitRate} mid={b.meanConf} color={col} />
+              <span className="rx-cal-tag" style={{ color: col }}>{over ? "over " + rxPts(b.evError) : under ? "under " + rxPts(b.evError) : "calibrated"}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ReflexionPanel({ accent }) {
+  const [tab, setTab] = useRxState("meso");
+  const c = computeReflexion(true);
+  const acc = accent || rxUP;
+  const S = c.summary;
+  const RX_MIN = 5; // predictions must resolve before calibration means anything
+
+  if (!S.nTotal || S.nResolved < RX_MIN) {
+    const pending = S.nTotal - S.nResolved;
+    return (
+      <section className="pm-card">
+        <div className="pm-card-eyebrow">Reflexion ledger · predicted vs realized</div>
+        <div className="rx-empty">
+          {S.nTotal
+            ? <><strong>{S.nResolved}</strong> of {S.nTotal} predictions have resolved so far{pending > 0 ? <> — <strong>{pending}</strong> are still marked at their entry price (aged &lt; 2 days, or the feed hasn't moved them yet)</> : null}. Calibration needs <strong>≥{RX_MIN}</strong> resolved calls before it means anything.</>
+            : <>No predictions logged yet.</>}
+          <div style={{ marginTop: 10 }}>The ledger reads the <strong>Tracker</strong> model books (regime-stamped, marked to the live feed) and your <strong>Portfolio Simulation</strong> accept/reject decisions. To populate it: connect the live feed so entry prices diverge from today's, or open the <em>Tracker → seed demo history</em> to back-date a track record.</div>
+        </div>
+      </section>
+    );
+  }
+
+
+  const overallCol = S.evError == null ? "var(--muted)" : S.evError > 0.06 ? rxWARN : S.evError < -0.06 ? rxBLUE : rxUP;
+  const verdict = S.evError == null ? "Gathering evidence"
+    : S.evError > 0.06 ? "Systematically overconfident — the model's conviction runs ahead of its hit-rate"
+    : S.evError < -0.06 ? "Underconfident — outcomes beat the stated conviction"
+    : "Well calibrated — conviction ≈ realized hit-rate";
+
+  return (
+    <section className="pm-card rx">
+      <style>{RX_CSS}</style>
+      <div className="rx-hero">
+        <div>
+          <div className="pm-card-eyebrow">Reflexion ledger · closing the learning loop</div>
+          <div className="rx-hero-title">What the engine got right — and where it's fooling itself</div>
+          <p className="rx-hero-sub">Every proposal in the Tracker books and your Portfolio Simulation is marked to the live feed and scored <strong>predicted vs realized</strong>. Bucketed by regime, theme and horizon so a systematic blind spot shows up as a pattern, not a one-off. Framed <em>micro → meso → macro</em>.</p>
+        </div>
+        <div className="rx-hero-kpis">
+          <div className="rx-kpi"><span>Predictions</span><strong>{S.nResolved}</strong><em>of {S.nTotal} logged · marked</em></div>
+          <div className="rx-kpi"><span>Hit-rate</span><strong style={{ color: S.hitRate >= 0.5 ? rxUP : rxDN }}>{S.hitRate == null ? "—" : Math.round(S.hitRate * 100) + "%"}</strong><em>direction resolved right</em></div>
+          <div className="rx-kpi"><span>Calibration</span><strong style={{ color: overallCol }}>{S.evError == null ? "—" : (S.evError > 0 ? "+" : "") + rxPts(S.evError)}</strong><em>conf − hit (pts)</em></div>
+        </div>
+      </div>
+
+      {/* MACRO strip */}
+      <div className="rx-macro" style={{ borderColor: overallCol + "55", background: overallCol + "0d" }}>
+        <span className="rx-macro-lvl" style={{ color: overallCol }}>MACRO</span>
+        <span className="rx-macro-txt" style={{ color: "var(--ink)" }}>{verdict}.</span>
+        {c.drift && Math.abs(c.drift.delta) > 0.08 && (
+          <span className="rx-macro-drift" style={{ color: c.drift.delta >= 0 ? rxUP : rxDN }}>
+            {c.drift.delta >= 0 ? "▲" : "▼"} drift {rxPts(c.drift.delta)}pts recent vs older
+          </span>
+        )}
+      </div>
+
+      <div className="rx-tabs">
+        <button className={tab === "meso" ? "on" : ""} onClick={() => setTab("meso")} style={tab === "meso" ? { borderColor: acc, color: acc } : {}}>Meso · patterns</button>
+        <button className={tab === "cal" ? "on" : ""} onClick={() => setTab("cal")} style={tab === "cal" ? { borderColor: acc, color: acc } : {}}>Calibration</button>
+        <button className={tab === "micro" ? "on" : ""} onClick={() => setTab("micro")} style={tab === "micro" ? { borderColor: acc, color: acc } : {}}>Micro · recent calls</button>
+      </div>
+
+      {tab === "meso" && (
+        <div className="rx-meso">
+          {c.meso && (
+            <div className="rx-meso-lead">
+              <span className="rx-lvl" style={{ color: rxWARN }}>MESO</span>
+              Biggest blind spot: <strong>{c.meso.key}</strong> — conviction {Math.round(c.meso.meanConf * 100)}% but only {Math.round(c.meso.hitRate * 100)}% hit ({c.meso.n} calls). The engine is <strong style={{ color: rxWARN }}>{rxPts(c.meso.evError)}pts overconfident</strong> here.
+            </div>
+          )}
+          <div className="rx-bt-grid">
+            <RxBucketTable title="By regime" sub="what backdrop was live" rows={c.byRegime} accent={acc} />
+            <RxBucketTable title="By theme" sub="sector of the name" rows={c.byTheme} accent={acc} />
+            <RxBucketTable title="By horizon" sub="how long the call has run" rows={c.byHorizon} accent={acc} />
+            <RxBucketTable title="By source model" sub="which book proposed it" rows={c.byModel} accent={acc} />
+          </div>
+          <div className="rx-foot">A bucket needs <strong>≥6 calls</strong> before its calibration is trustworthy (greyed n below that). "Over/under" = mean conviction minus realized hit-rate, in points.</div>
+        </div>
+      )}
+
+      {tab === "cal" && (
+        <div className="rx-cal-view">
+          <div className="rx-cal-lead">Do the confidence numbers mean anything? A calibrated model's <strong>70% conviction bucket hits ~70%</strong>. Bars below the dashed conviction marker = overconfident.</div>
+          <div className="rx-calbands">
+            {c.calibration.map((b) => (
+              <div className="rx-calband" key={b.lo}>
+                <span className="rx-calband-lbl mono">{Math.round(b.lo * 100)}–{Math.round(b.hi * 100)}%</span>
+                {b.n ? <>
+                  <div className="rx-calband-bar">
+                    <i style={{ width: (b.realized * 100) + "%", background: b.realized >= b.predicted - 0.06 ? rxUP : rxWARN }} />
+                    <span className="rx-bar-mid" style={{ left: b.predicted * 100 + "%" }} />
+                  </div>
+                  <span className="rx-calband-v mono">{Math.round(b.realized * 100)}% hit · {b.n}</span>
+                </> : <span className="rx-calband-empty">no calls in band</span>}
+              </div>
+            ))}
+          </div>
+          <div className="rx-foot">Dashed marker = average stated conviction in the band; bar = realized hit-rate. Aligned = trustworthy confidence.</div>
+        </div>
+      )}
+
+      {tab === "micro" && (
+        <div className="rx-micro">
+          <div className="rx-micro-lead"><span className="rx-lvl" style={{ color: rxBLUE }}>MICRO</span>The most recent marked calls — the raw material the patterns above are built from.</div>
+          <div className="rx-micro-rowh"><span>Date</span><span>Call</span><span>Regime</span><span className="ta-r">Conf</span><span className="ta-r">Realized</span><span className="ta-r">Verdict</span></div>
+          {c.micro.map((r, i) => (
+            <div className="rx-micro-row" key={i}>
+              <span className="mono rx-micro-date">{r.date}</span>
+              <span><strong>{r.action}</strong> {r.ticker} <em className="rx-micro-sec">{r.sector}</em></span>
+              <span className="rx-micro-reg">{r.regime || "—"}</span>
+              <span className="ta-r mono">{Math.round(r.conf * 100)}%</span>
+              <span className="ta-r mono" style={{ color: r.realized >= 0 ? rxUP : rxDN }}>{rxPct(r.realized)}</span>
+              <span className="ta-r">{r.resolved ? (r.hit ? <span style={{ color: rxUP }}>✓ hit</span> : <span style={{ color: rxDN }}>✕ miss</span>) : <span style={{ color: "var(--muted)" }}>pending</span>}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="rx-advisory">
+        <div className="rx-advisory-h"><span className="rx-lvl" style={{ color: acc }}>ADVISORY</span>What the engine would learn from this</div>
+        {(() => {
+          const worst = c.byRegime.concat(c.byTheme).filter((b) => b.n >= 8 && Math.abs(b.evError) > 0.06)
+            .sort((a, b) => Math.abs(b.evError) - Math.abs(a.evError)).slice(0, 3);
+          if (!worst.length) return <div className="rx-advisory-b">Not enough evidence in any single bucket yet (need ≥8 calls) to justify a confidence adjustment. The ledger keeps accruing — this stays advisory until Phase 1b wires an approved edit into config.</div>;
+          return (
+            <div className="rx-advisory-list">
+              {worst.map((b) => {
+                const mult = rxClamp(1 - rxClamp(b.evError, -0.25, 0.25) * 0.5, 0.7, 1.2);
+                return (
+                  <div className="rx-adv-row" key={b.key}>
+                    <span className="rx-adv-k">{b.key}</span>
+                    <span className="rx-adv-arrow" style={{ color: b.evError > 0 ? rxWARN : rxBLUE }}>{b.evError > 0 ? "down-weight" : "up-weight"} conviction ×{mult.toFixed(2)}</span>
+                    <span className="rx-adv-why">{Math.round(b.meanConf * 100)}% stated vs {Math.round(b.hitRate * 100)}% real ({b.n})</span>
+                  </div>
+                );
+              })}
+              <div className="rx-foot">Advisory only — <strong>not applied</strong> to the live engine. <code>window.HelmReflexion.adjustment(regime, sector)</code> exposes these multipliers; Phase 1b lets you approve one into config.</div>
+            </div>
+          );
+        })()}
+      </div>
+    </section>
+  );
+}
+
+const RX_CSS = `
+.rx { display: flex; flex-direction: column; gap: 0; }
+.rx-hero { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+.rx-hero-title { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; margin: 3px 0 7px; }
+.rx-hero-sub { font-size: 13px; color: var(--ink-2); line-height: 1.55; max-width: 640px; }
+.rx-hero-sub strong { color: var(--ink); } .rx-hero-sub em { font-style: normal; color: var(--ink); font-weight: 600; }
+.rx-hero-kpis { display: flex; gap: 10px; flex: none; }
+.rx-kpi { background: var(--panel-2); border: 1px solid var(--line); border-radius: 11px; padding: 11px 14px; min-width: 96px; }
+.rx-kpi span { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); display: block; }
+.rx-kpi strong { font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; display: block; margin: 2px 0 1px; }
+.rx-kpi em { font-size: 10.5px; color: var(--muted); font-style: normal; }
+.rx-macro { display: flex; align-items: center; gap: 12px; border: 1px solid; border-radius: 11px; padding: 11px 15px; margin: 16px 0 4px; flex-wrap: wrap; }
+.rx-macro-lvl, .rx-lvl { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.1em; padding: 2px 7px; border: 1px solid currentColor; border-radius: 20px; flex: none; }
+.rx-macro-txt { font-size: 13px; font-weight: 500; flex: 1; }
+.rx-macro-drift { font-family: var(--mono); font-size: 12px; font-weight: 700; }
+.rx-tabs { display: flex; gap: 8px; margin: 16px 0 14px; flex-wrap: wrap; }
+.rx-tabs button { font: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 13px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink-2); cursor: pointer; }
+.rx-meso-lead, .rx-cal-lead, .rx-micro-lead { font-size: 13px; color: var(--ink-2); line-height: 1.5; margin-bottom: 14px; display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+.rx-meso-lead strong, .rx-cal-lead strong, .rx-micro-lead strong { color: var(--ink); }
+.rx-lvl { align-self: center; }
+.rx-bt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.rx-bt { border: 1px solid var(--line); border-radius: 11px; padding: 13px 15px; }
+.rx-bt-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 9px; }
+.rx-bt-head strong { font-size: 13.5px; } .rx-bt-head span { font-size: 11px; color: var(--muted); }
+.rx-bt-rowh { display: grid; grid-template-columns: 1.3fr 30px 42px 56px 1.5fr; gap: 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding-bottom: 6px; border-bottom: 1px solid var(--line-2); }
+.rx-bt-row { display: grid; grid-template-columns: 1.3fr 30px 42px 56px 1.5fr; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line-2); font-size: 12.5px; }
+.rx-bt-row:last-child { border-bottom: 0; }
+.rx-bt-k { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rx-cal { display: flex; align-items: center; gap: 8px; }
+.rx-bar { position: relative; flex: 1; height: 8px; background: var(--line-2); border-radius: 5px; overflow: visible; }
+.rx-bar i { display: block; height: 100%; border-radius: 5px; }
+.rx-bar-mid { position: absolute; top: -2px; width: 2px; height: 12px; background: var(--ink); opacity: 0.55; border-radius: 2px; }
+.rx-cal-tag { font-family: var(--mono); font-size: 10.5px; font-weight: 600; white-space: nowrap; min-width: 62px; }
+.rx-calbands { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.rx-calband { display: grid; grid-template-columns: 70px 1fr 110px; gap: 12px; align-items: center; }
+.rx-calband-lbl { font-size: 12px; font-weight: 600; }
+.rx-calband-bar { position: relative; height: 12px; background: var(--line-2); border-radius: 6px; }
+.rx-calband-bar i { display: block; height: 100%; border-radius: 6px; }
+.rx-calband-v { font-size: 11.5px; color: var(--ink-2); text-align: right; }
+.rx-calband-empty { font-size: 11.5px; color: var(--muted); }
+.rx-micro-rowh { display: grid; grid-template-columns: 82px 1.5fr 1fr 46px 66px 56px; gap: 10px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding-bottom: 7px; border-bottom: 1px solid var(--line-2); }
+.rx-micro-row { display: grid; grid-template-columns: 82px 1.5fr 1fr 46px 66px 56px; gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line-2); font-size: 12.5px; }
+.rx-micro-row:last-child { border-bottom: 0; }
+.rx-micro-date { font-size: 11.5px; color: var(--ink-2); } .rx-micro-sec { font-style: normal; color: var(--muted); font-size: 11px; }
+.rx-micro-reg { font-size: 11.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rx-advisory { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+.rx-advisory-h { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 700; margin-bottom: 11px; }
+.rx-advisory-b { font-size: 12.5px; color: var(--ink-2); line-height: 1.5; }
+.rx-advisory-list { display: flex; flex-direction: column; gap: 8px; }
+.rx-adv-row { display: grid; grid-template-columns: 1.1fr 1.2fr 1.4fr; gap: 12px; align-items: center; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 9px 13px; font-size: 12.5px; }
+.rx-adv-k { font-weight: 700; } .rx-adv-arrow { font-family: var(--mono); font-size: 12px; font-weight: 700; } .rx-adv-why { font-size: 11.5px; color: var(--muted); text-align: right; }
+.rx-foot { font-size: 11px; color: var(--muted); margin-top: 11px; line-height: 1.5; }
+.rx-foot strong { color: var(--ink-2); } .rx-foot code { font-family: var(--mono); font-size: 10.5px; background: var(--line-2); padding: 1px 5px; border-radius: 4px; }
+.rx-empty { font-size: 13px; color: var(--ink-2); line-height: 1.6; padding: 8px 0 4px; } .rx-empty strong { color: var(--ink); } .rx-empty em { color: var(--ink); font-style: italic; }
+@media (max-width: 820px) { .rx-bt-grid { grid-template-columns: 1fr; } .rx-hero-kpis { width: 100%; } }
 `;
 
-window.Screener = Screener;
-window.HelmUniverse = UNIVERSE;
-window.helmDurationOf = durationOf;
+window.ReflexionPanel = ReflexionPanel;

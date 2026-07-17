@@ -1,91 +1,194 @@
-/**
- * Helm — fast-lane quote poller (Cloudflare Worker).
- *
- * Why a Worker and not GitHub Actions: Actions cron is 5-min minimum and heavily
- * throttled. A Worker cron trigger fires every minute on the free tier (100k req/day)
- * and KV gives a free key/value store the front-end can read over HTTPS (CORS-open).
- *
- * Cadence: this handles ONLY quotes (last price + day change). History, fundamentals,
- * macro, liquidity and news stay on the once-daily GitHub Action (feed/ingest.py) —
- * they don't change intraday.
- *
- * Free-data reality:
- *   - US stocks/ETFs : Finnhub /quote (real-time, 60 calls/min free) — env FINNHUB_KEY
- *   - Crypto         : CoinGecko simple/price (free, no key)
- *   - Canadian / TSX : NOT free intraday — left at the daily EOD close (front-end keeps it)
- *
- * Setup:
- *   wrangler kv:namespace create HELM_QUOTES
- *   add the binding + a `"* * * * *"` cron trigger in wrangler.toml
- *   wrangler secret put FINNHUB_KEY
- *   set US_TICKERS below (or load from KV "config")
- */
+// pulse.jsx — the Pulse: one 0–100 composite for the tape, computed not vibed.
+// Six inputs, each scored 0–100 from real feed series when present (provenance
+// flagged), deterministic demo values otherwise: net-liquidity trend, Global-M2
+// impulse, HY credit spreads (FRED OAS), VIX level+trend, JPY-carry stability,
+// breadth. Deterministic — no LLM. Feeds the Bridge dial + Stone-style stress
+// flag; gates nothing by itself.
+(function () {
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const last = (a) => a[a.length - 1];
 
-const US_TICKERS = ["NVDA", "AVGO", "MSFT", "AAPL", "AMD", "TSLA", "META", "COIN", "LLY", "SHOP"];
-const CRYPTO = { bitcoin: "BTC", ethereum: "ETH", solana: "SOL" };
-
-const MARKET_OPEN_UTC = 13 * 60 + 30; // 09:30 ET
-const MARKET_CLOSE_UTC = 20 * 60;     // 16:00 ET (approx; ignores DST + holidays)
-
-function isUsMarketHours(d) {
-  const day = d.getUTCDay();
-  if (day === 0 || day === 6) return false;
-  const mins = d.getUTCHours() * 60 + d.getUTCMinutes();
-  return mins >= MARKET_OPEN_UTC && mins <= MARKET_CLOSE_UTC;
-}
-
-async function finnhubQuote(ticker, key) {
-  const r = await fetch(`https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${key}`);
-  if (!r.ok) return null;
-  const j = await r.json();            // { c: current, dp: day %change, t: ts }
-  if (j.c == null || j.c === 0) return null;
-  return { last: j.c, chgPct: +(j.dp ?? 0).toFixed(2), asOf: new Date((j.t || 0) * 1000).toISOString() };
-}
-
-async function cryptoQuotes() {
-  const ids = Object.keys(CRYPTO).join(",");
-  const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`);
-  if (!r.ok) return {};
-  const j = await r.json();
-  const out = {};
-  for (const [id, sym] of Object.entries(CRYPTO)) {
-    if (j[id]) out[sym] = { last: j[id].usd, chgPct: +(j[id].usd_24h_change ?? 0).toFixed(2), asOf: new Date().toISOString() };
+  function liveSeries(key) {
+    const m = window.HelmFeed && window.HelmFeed.macro;
+    const s = m && m[key];
+    if (Array.isArray(s) && s.length > 5) return s.map((o) => (o && o.v != null ? o.v : o)).filter((v) => v != null && !isNaN(v));
+    return null;
   }
-  return out;
-}
 
-async function refresh(env) {
-  const now = new Date();
-  const quotes = {};
-  // crypto trades 24/7 — always refresh
-  Object.assign(quotes, await cryptoQuotes());
-  // US equities only during market hours (saves the free quota off-hours)
-  if (isUsMarketHours(now) && env.FINNHUB_KEY) {
-    for (const t of US_TICKERS) {
-      const q = await finnhubQuote(t, env.FINNHUB_KEY);
-      if (q) quotes[t] = q;
+  // score helpers: map a change/level onto 0–100 where 100 = maximally supportive
+  const scoreTrend = (chgPct, span) => clamp(50 + (chgPct / span) * 50, 0, 100);
+  const scoreLevelInv = (v, lo, hi) => clamp(100 - ((v - lo) / (hi - lo)) * 100, 0, 100); // low value = good
+
+  function components() {
+    const out = [];
+
+    // 1 · Fed net liquidity (13-week trend)
+    const nl = liveSeries("net_liquidity");
+    {
+      const arr = nl || null;
+      const chg = arr ? (last(arr) / arr[Math.max(0, arr.length - 65)] - 1) * 100 : 1.2;
+      out.push({ k: "Net liquidity", real: !!arr, score: scoreTrend(chg, 6),
+        read: `${chg >= 0 ? "+" : ""}${chg.toFixed(1)}% vs 13wk — ${chg >= 0.5 ? "rising" : chg <= -0.5 ? "draining" : "flat"}` });
     }
-  }
-  const prev = JSON.parse((await env.HELM_QUOTES.get("quotes")) || "{}");
-  const merged = { ...prev, ...quotes, _updatedAt: now.toISOString(), _marketOpen: isUsMarketHours(now) };
-  await env.HELM_QUOTES.put("quotes", JSON.stringify(merged));
-  return merged;
-}
 
-export default {
-  // cron: "* * * * *"  (every minute)
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(refresh(env));
-  },
-  // GET endpoint the front-end polls: returns the latest quotes (CORS-open)
-  async fetch(request, env) {
-    const data = (await env.HELM_QUOTES.get("quotes")) || "{}";
-    return new Response(data, {
-      headers: {
-        "content-type": "application/json",
-        "access-control-allow-origin": "*",
-        "cache-control": "no-store",
-      },
-    });
-  },
-};
+    // 2 · Global M2 impulse (Pal lens; live series is MONTHLY — 6 obs ≈ 6mo)
+    {
+      const m2 = liveSeries("global_m2");
+      const chg = m2 ? (last(m2) / m2[Math.max(0, m2.length - 7)] - 1) * 100 : 2.1;
+      out.push({ k: "Global M2 impulse", real: !!m2, score: scoreTrend(chg, 5),
+        read: `${chg >= 0 ? "+" : ""}${chg.toFixed(1)}% 6mo — ${chg >= 1 ? "expanding" : chg <= -1 ? "contracting" : "flat"}` });
+    }
+
+    // 3 · HY credit spreads (OAS %, level + 4wk change)
+    {
+      const oas = liveSeries("hy_oas");
+      const v = oas ? last(oas) : 3.4;
+      const chg4w = oas && oas.length > 20 ? v - oas[oas.length - 21] : -0.1;
+      const s = scoreLevelInv(v, 2.5, 6.0) * 0.7 + scoreLevelInv(chg4w, -0.3, 0.8) * 0.3;
+      out.push({ k: "HY spreads", real: !!oas, score: s,
+        read: `${(v * 100).toFixed(0)} bp ${chg4w >= 0.05 ? "widening" : chg4w <= -0.05 ? "tightening" : "stable"} — ${v < 3.5 ? "benign" : v < 4.5 ? "watch" : "stress"}` });
+    }
+
+    // 4 · VIX level + 3-week trend (proxy for term-structure stress w/o futures data)
+    {
+      const vix = liveSeries("vix");
+      const v = vix ? last(vix) : 17.5;
+      const chg = vix && vix.length > 15 ? v - vix[vix.length - 16] : 0.8;
+      const s = scoreLevelInv(v, 12, 32) * 0.7 + scoreLevelInv(chg, -3, 8) * 0.3;
+      out.push({ k: "VIX", real: !!vix, score: s,
+        read: `${v.toFixed(1)} ${chg >= 1 ? "rising" : chg <= -1 ? "falling" : "calm"} — ${v < 16 ? "complacent-calm" : v < 22 ? "normal" : v < 28 ? "tense" : "stress"}` });
+    }
+
+    // 5 · JPY carry stability (JPY/USD 6wk move; sharp yen strength = unwind risk)
+    {
+      const jp = liveSeries("jpy_usd");
+      const chg = jp && jp.length > 30 ? (last(jp) / jp[jp.length - 31] - 1) * 100 : -1.1;
+      // JPY per USD falling = yen strengthening = carry stress → low score
+      const s = clamp(50 + (chg / 5) * 50, 0, 100);
+      out.push({ k: "JPY carry", real: !!(jp && jp.length > 30), score: s,
+        read: `yen ${chg <= -0.2 ? "strengthening" : chg >= 0.2 ? "weakening" : "stable"} ${chg >= 0 ? "+" : ""}${chg.toFixed(1)}% 6wk — ${chg <= -3 ? "unwind risk" : chg <= -1 ? "tightening, watch" : "carry intact"}` });
+    }
+
+    // 6 · Breadth: % of tracked names above their 50d average (held + universe, real feed prices)
+    {
+      const S = window.HelmSigma;
+      let pct = null;
+      if (S) {
+        const seen = {};
+        (window.PMData.allHoldings || []).forEach((h) => { seen[h.ticker] = 1; });
+        (window.HelmUniverse || []).forEach((u) => { seen[u.ticker] = 1; });
+        const tickers = Object.keys(seen);
+        let above = 0, total = 0, real = 0;
+        tickers.forEach((t) => {
+          const sr = S.seriesFor(t, 60);
+          if (!sr.arr || sr.arr.length < 55) return;
+          const a = sr.arr, ma = a.slice(-50).reduce((x, y) => x + y, 0) / 50;
+          total++; if (last(a) > ma) above++; if (sr.real) real++;
+        });
+        if (total > 30) pct = { v: (above / total) * 100, realShare: real / total };
+      }
+      const v = pct ? pct.v : 44;
+      out.push({ k: "Breadth", real: !!(pct && pct.realShare > 0.5), score: clamp((v - 20) / 60 * 100, 0, 100),
+        read: `${v.toFixed(0)}% above 50d — ${v >= 60 ? "broad participation" : v >= 45 ? "ok" : v >= 35 ? "thin" : "narrow"}` });
+    }
+
+    return out;
+  }
+
+  const WEIGHTS = { "Net liquidity": 0.22, "Global M2 impulse": 0.15, "HY spreads": 0.20, "VIX": 0.15, "JPY carry": 0.13, "Breadth": 0.15 };
+
+  let _cache = null, _stamp = 0;
+  function compute() {
+    if (_cache && Date.now() - _stamp < 60000) return _cache;
+    const comp = components();
+    const score = Math.round(comp.reduce((s, c) => s + c.score * (WEIGHTS[c.k] || 0.15), 0));
+    // 7d delta: persist a tiny daily history so the dial can show direction honestly
+    let hist = [];
+    try { hist = JSON.parse(localStorage.getItem("helm_pulse_hist_v1") || "[]"); } catch (e) {}
+    const day = new Date().toISOString().slice(0, 10);
+    if (!hist.length || hist[hist.length - 1].d !== day) hist.push({ d: day, s: score });
+    else hist[hist.length - 1].s = score;
+    hist = hist.slice(-30);
+    try { localStorage.setItem("helm_pulse_hist_v1", JSON.stringify(hist)); } catch (e) {}
+    const prev = hist.length > 1 ? hist[Math.max(0, hist.length - 8)].s : null;
+    const delta7 = prev != null ? score - prev : null;
+    const label = score >= 65 ? "RISK-ON" : score >= 50 ? "RISK-ON · THINNING" : score >= 35 ? "CAUTIOUS" : "RISK-OFF";
+    const stress = comp.filter((c) => (c.k === "HY spreads" || c.k === "VIX" || c.k === "JPY carry") && c.score < 30);
+    const realN = comp.filter((c) => c.real).length;
+    _cache = { score, label, delta7, comp, stress: stress.map((c) => c.k), realN, total: comp.length };
+    _stamp = Date.now();
+    return _cache;
+  }
+
+  function bustCache() { _cache = null; _stamp = 0; }
+
+  // ---- the dial (compact, for the Bridge) ----
+  function PulseDial({ onOpen }) {
+    const [open, setOpen] = React.useState(false);
+    const [, force] = React.useState(0);
+    React.useEffect(() => {
+      const h = () => { bustCache(); force((n) => n + 1); };
+      window.addEventListener("helm:feed", h);
+      return () => window.removeEventListener("helm:feed", h);
+    }, []);
+    const p = compute();
+    const col = p.score >= 65 ? "#0e9f6e" : p.score >= 50 ? "#d97706" : p.score >= 35 ? "#d97706" : "#e02424";
+    const arc = 175.9 * (p.score / 100); // semicircle r=56 → πr ≈ 175.9
+    return (
+      <section className="pm-card pl-card">
+        <div className="pl-row" onClick={() => setOpen(!open)} title="Click for components">
+          <div className="pl-g">
+            <svg viewBox="0 0 140 78" style={{ width: 120, display: "block" }}>
+              <path d="M 14 72 A 56 56 0 0 1 126 72" fill="none" stroke="var(--line, #e8ebef)" strokeWidth="11" strokeLinecap="round"></path>
+              <path d="M 14 72 A 56 56 0 0 1 126 72" fill="none" stroke={col} strokeWidth="11" strokeLinecap="round" strokeDasharray={`${arc} 999`}></path>
+            </svg>
+            <div className="pl-num mono" style={{ color: col }}>{p.score}</div>
+          </div>
+          <div className="pl-main">
+            <div className="pl-eyebrow">Pulse · the tape in one number</div>
+            <div className="pl-label mono" style={{ color: col }}>{p.label}{p.delta7 != null ? ` · 7d ${p.delta7 >= 0 ? "+" : ""}${p.delta7}` : ""}</div>
+            <div className="pl-sub"><span>{p.stress.length ? `⚠ stress: ${p.stress.join(", ")}` : "no stress flags"} · {p.realN}/{p.total} live series</span><span className="pl-more">{open ? "hide ▴" : "components ▾"}</span></div>
+          </div>
+        </div>
+        {open && (
+          <div className="pl-comp">
+            {p.comp.map((c) => (
+              <div className="pl-c" key={c.k}>
+                <span className="pl-c-k">{c.k}{c.real ? "" : <i title="demo value — series not in feed yet"> · demo</i>}</span>
+                <span className="pl-c-bar"><span style={{ width: c.score + "%", background: c.score >= 55 ? "#0e9f6e" : c.score >= 35 ? "#d97706" : "#e02424" }}></span></span>
+                <span className="pl-c-read">{c.read}</span>
+              </div>
+            ))}
+            <div className="pl-note">Composite = weighted scores (liquidity 22 · HY 20 · M2 15 · VIX 15 · breadth 15 · JPY 13). Informs the regime read and the brief; gates nothing by itself.</div>
+          </div>
+        )}
+      </section>
+    );
+  }
+
+  const PULSE_CSS = `
+  .pl-card { padding: 12px 16px; }
+  .pl-row { display: flex; align-items: center; gap: 16px; cursor: pointer; }
+  .pl-g { position: relative; flex: none; }
+  .pl-num { position: absolute; left: 0; right: 0; bottom: 2px; text-align: center; font-size: 22px; font-weight: 700; }
+  .pl-eyebrow { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
+  .pl-label { font-size: 13px; font-weight: 700; margin-top: 2px; }
+  .pl-sub { font-size: 11px; color: var(--muted); margin-top: 3px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .pl-more { color: var(--ink-2); font-weight: 600; white-space: nowrap; }
+  .pl-comp { margin-top: 12px; border-top: 1px solid var(--line-2, #f0f2f5); padding-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+  .pl-c { display: grid; grid-template-columns: 130px 90px 1fr; gap: 10px; align-items: center; font-size: 11.5px; }
+  .pl-c-k { font-weight: 600; color: var(--ink); }
+  .pl-c-k i { font-style: normal; color: #b45309; font-size: 9.5px; }
+  .pl-c-bar { height: 6px; background: var(--line-2, #f0f2f5); border-radius: 4px; overflow: hidden; }
+  .pl-c-bar span { display: block; height: 100%; border-radius: 4px; }
+  .pl-c-read { color: var(--ink-2); font-family: var(--mono); font-size: 10.5px; }
+  .pl-note { font-size: 10.5px; color: var(--muted); line-height: 1.5; margin-top: 4px; }
+  @media (max-width: 700px) { .pl-c { grid-template-columns: 110px 60px 1fr; } }
+  `;
+  if (!document.getElementById("helm-pulse-css")) {
+    const el = document.createElement("style"); el.id = "helm-pulse-css"; el.textContent = PULSE_CSS; document.head.appendChild(el);
+  }
+
+  window.HelmPulse = { compute, components, bustCache };
+  window.PulseDial = PulseDial;
+})();

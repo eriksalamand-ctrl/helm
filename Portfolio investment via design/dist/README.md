@@ -1,49 +1,15 @@
-name: Helm daily feed (slow lane)
-
-# Heavy data once a day — history, fundamentals, macro, liquidity model, news.
-# Quotes are handled separately by the Cloudflare Worker (feed/quotes-worker.js).
-# Paths are auto-located so this works whether the project sits at the repo root
-# or inside a subfolder.
-on:
-  schedule:
-    - cron: "30 21 * * 1-5"   # 21:30 UTC, weekdays (~after US market close)
-  workflow_dispatch: {}        # allow manual runs from the Actions tab
-
-permissions:
-  contents: write
-
-# Prevent overlapping runs (e.g. a manual re-run firing while another is still
-# ingesting) from racing to push and rejecting each other.
-concurrency:
-  group: helm-daily-feed
-  cancel-in-progress: false
-
-jobs:
-  ingest:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Locate and run ingestion (pure stdlib)
-        env:
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-        run: |
-          F=$(find . -name ingest.py -path '*feed*' | head -1)
-          echo "Running $F"
-          python "$F"
-      - name: Commit snapshots
-        run: |
-          git config user.name "helm-bot"
-          git config user.email "bot@users.noreply.github.com"
-          git add -A
-          git commit -m "feed: $(date -u +%FT%TZ)" || echo "no changes"
-          # rebase onto whatever is newest on main before pushing, retrying a
-          # few times in case another run (or a manual upload) landed first.
-          for i in 1 2 3 4 5; do
-            git pull --rebase origin main && git push && break
-            echo "push rejected, retrying ($i)..."
-            sleep $((RANDOM % 10 + 3))
-          done
+// feed-config.js — point Helm at your live data feed.
+// Leave EMPTY ("") to run on the built-in demo data (mock mode).
+//
+// We read directly from raw.githubusercontent.com — the daily GitHub Action commits
+// feed/public/*.json and raw serves them (CORS-enabled for GET).
+//
+// NOTE: in this repo the feed lives under the nested upload folder, so the path includes
+// "Portfolio investment via design/dist". The Action ran (verified: real data from
+// stooq/coingecko/bankofcanada/fred/finnhub/gdelt). If you later move feed/ to the repo
+// ROOT, change the base back to ".../main/feed/public".
+//
+// VERIFY: open <base>/meta.json in a browser — JSON = the top-bar pill flips Demo → Live.
+window.HELM_FEED_BASE = "https://raw.githubusercontent.com/eriksalamand-ctrl/helm/main/Portfolio%20investment%20via%20design/dist/feed/public";    // daily: prices/fx/macro/news/fundamentals
+window.HELM_QUOTES_BASE = "https://raw.githubusercontent.com/eriksalamand-ctrl/helm/main/Portfolio%20investment%20via%20design/dist/feed/public";  // minute quotes (set to your Cloudflare Worker URL once deployed; falls back to HELM_FEED_BASE)
+window.HELM_TRANSCRIPT_BASE = "";  // YouTube-link transcripts for Vera intake — deploy feed/transcript-worker.js (2 min, free) and put its URL here; empty = public-reader fallback, less reliable

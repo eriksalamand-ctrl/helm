@@ -1,325 +1,321 @@
-// macro.jsx — Macro module: liquidity model, yield curve, key indicators, geopolitical feed.
-// Reads window.HelmFeed.macro / .news when the feed is live; otherwise deterministic mock.
-// Grounded in NBC Finance 101: Séance 08 (what moves markets), 10 (yield curves), 12 (commodities).
-const { useState: useStateM } = React;
+// intake.jsx — Vera's intake: the YouTube / research-note analyser.
+// Paste a transcript (or your notes) from a video/podcast/article; Vera extracts the
+// testable CLAIMS (ticker/theme, direction, horizon), marks each to the tape at intake,
+// and scores them as they age — so each SOURCE accrues an honest credibility record.
+// Extraction uses window.claude.complete when available, with a deterministic
+// keyword fallback (same pattern as analysis.jsx). Nothing here places orders;
+// claims are evidence for the round table, weighted by source credibility.
+(function () {
+  const { useState: useVkState } = React;
+  const KEY = "helm_intake_v1";
+  const load = () => { try { return JSON.parse(localStorage.getItem(KEY) || "null") || { sources: {}, claims: [] }; } catch (e) { return { sources: {}, claims: [] }; } };
+  const save = (j) => { try { localStorage.setItem(KEY, JSON.stringify(j)); } catch (e) {} };
+  const today = () => new Date().toISOString().slice(0, 10);
+  const uid = () => Math.random().toString(36).slice(2, 9);
 
-const mUP = "#0e9f6e", mDOWN = "#e02424", mWARN = "#d97706";
-const mClamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const HZ = { wk: { label: "weeks", days: 21, bar: 2.5 }, mo: { label: "months", days: 63, bar: 5 }, qtr: { label: "quarters", days: 180, bar: 9 } };
 
-function mMul(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
-function walk(seed, n, start, drift, vol, floor) {
-  const rnd = mMul(seed); const out = []; let v = start;
-  for (let i = 0; i < n; i++) { v = v * (1 + drift / n + (rnd() - 0.5) * 2 * vol); if (floor != null) v = Math.max(floor, v); out.push(v); }
-  return out;
-}
+  function lastPrice(ticker) {
+    const s = window.HelmSigma && window.HelmSigma.seriesFor(ticker, 10);
+    return s && s.arr && s.arr.length ? { p: s.arr[s.arr.length - 1], real: !!s.real } : null;
+  }
 
-// ---- assemble macro series: live if present, else deterministic mock ----
-function getMacro() {
-  const live = window.HelmFeed && window.HelmFeed.macro;
-  const pick = (key, fallback) => {
-    if (live && Array.isArray(live[key]) && live[key].length) return live[key].map((o) => o.v);
-    return fallback;
-  };
-  // net liquidity: normalize to BILLIONS regardless of whether feed sent millions or billions
-  let nl = pick("net_liquidity", walk(101, 60, 5950, -0.06, 0.012, 4000));
-  if (nl.length && Math.max(...nl) > 100000) nl = nl.map((v) => v / 1000); // millions → billions
-  // CPI: if the feed sent the raw index level (~250-360), convert to YoY %
-  let cpiRaw = pick("us_cpi", null);
-  let cpi;
-  if (cpiRaw && cpiRaw.length) {
-    if (Math.max(...cpiRaw) > 50) {           // index level, not a percent
-      const out = [];
-      for (let i = 12; i < cpiRaw.length; i++) {
-        if (cpiRaw[i - 12]) out.push((cpiRaw[i] / cpiRaw[i - 12] - 1) * 100);
-      }
-      cpi = out.length ? out : [2.9];
-    } else {
-      cpi = cpiRaw;                            // already YoY %
+  // ---- deterministic fallback extractor: universe tickers + direction words near them ----
+  function fallbackExtract(text) {
+    const uni = [...(window.HelmUniverse || []).map((u) => u.ticker), ...(window.PMData.allHoldings || []).map((h) => h.ticker)];
+    const names = {}; (window.HelmUniverse || []).forEach((u) => { names[u.name.toLowerCase()] = u.ticker; });
+    const BULL = /(bullish|buy|long|accumulate|upside|breakout|undervalued|target higher|going up|moon|rip)/i;
+    const BEAR = /(bearish|sell|short|downside|overvalued|crash|correction|top is in|going down|avoid)/i;
+    const sents = text.split(/(?<=[.!?])\s+|\n+/).filter((s) => s.trim().length > 15);
+    const seen = {}, out = [];
+    for (const s of sents) {
+      let tkr = null;
+      for (const t of uni) { const base = t.replace(".TO", "").replace(".B", ""); if (new RegExp(`\\b${base.replace(/[.^$*+?()[\]{}|\\]/g, "\\$&")}\\b`, "i").test(s) && base.length > 1) { tkr = t; break; } }
+      if (!tkr) { for (const nm in names) { if (s.toLowerCase().includes(nm)) { tkr = names[nm]; break; } } }
+      const dir = BULL.test(s) ? "bullish" : BEAR.test(s) ? "bearish" : null;
+      if (!tkr || !dir || seen[tkr + dir]) continue;
+      seen[tkr + dir] = true;
+      out.push({ ticker: tkr, direction: dir, horizon: /quarter|year|long.term|cycle/i.test(s) ? "qtr" : /month/i.test(s) ? "mo" : "wk", quote: s.trim().slice(0, 180) });
+      if (out.length >= 8) break;
     }
-  } else {
-    cpi = walk(104, 60, 2.9, -0.04, 0.01, 0);
+    return out;
   }
-  return {
-    live: !!live,
-    netLiquidity: nl,
-    us10y: pick("us10y", walk(102, 60, 4.55, -0.07, 0.02, 0.5)),
-    us2y: pick("us2y", walk(103, 60, 4.35, -0.10, 0.02, 0.5)),
-    cpi: cpi,
-    unemployment: pick("us_unemployment", walk(105, 60, 4.1, 0.05, 0.008, 0)),
-    fedFunds: pick("fed_funds", walk(106, 60, 4.5, -0.06, 0.004, 0)),
-    oil: pick("wti_oil", walk(107, 60, 74, 0.12, 0.02, 20)),
-  };
-}
 
-const last = (a) => a[a.length - 1];
-const chg = (a) => a.length > 1 ? a[a.length - 1] - a[0] : 0;
-
-// ---- Global M2 liquidity (Raoul Pal lens): BTC tracks global M2 with a ~10–12 week lag ----
-function globalM2Series() {
-  const live = window.HelmFeed && window.HelmFeed.macro && window.HelmFeed.macro.global_m2;
-  if (live && live.length) return live.map((o) => o.v);
-  return walk(303, 78, 102, 0.16, 0.010, 80).map((v) => v * 1000); // ~$102T in trillions
-}
-function btcVsM2(m2, lagWeeks) {
-  const rnd = mMul(404); const out = [];
-  for (let i = 0; i < m2.length; i++) {
-    const src = m2[Math.max(0, i - lagWeeks)];
-    const amp = 1 + (src / m2[0] - 1) * 6.5;            // BTC ~6.5× the M2 impulse
-    out.push(40000 * amp * (1 + (rnd() - 0.5) * 0.04));
+  async function extract(text) {
+    const ai = (window.helmAI && window.helmAI.complete) || (window.claude && window.claude.complete);
+    if (!ai) return { claims: fallbackExtract(text), via: "rules" };
+    const prompt = `You are Vera, an investment analyst. From the transcript below, extract the TESTABLE market claims only (a claim = a named ticker or asset + a direction). Ignore vibes, ads, and hedged non-calls.
+Reply with ONLY a JSON array, max 8 items, each: {"ticker": "SYMBOL (use .TO suffix for TSX; BTC/ETH/SOL for coins)", "direction": "bullish"|"bearish", "horizon": "wk"|"mo"|"qtr", "quote": "shortest verbatim fragment supporting it (max 25 words)"}
+A section headed [ON-SCREEN CHARTS] lists what the video showed visually — claims supported there are chart-backed: append " [chart]" to their quote.
+If there are no testable claims, reply [].
+TRANSCRIPT:
+${text.slice(0, 6000)}`;
+    try {
+      const out = await ai(prompt);
+      const m = out.match(/\[[\s\S]*\]/);
+      const arr = JSON.parse(m ? m[0] : out);
+      if (!Array.isArray(arr)) throw new Error("shape");
+      return { claims: arr.filter((c) => c && c.ticker && /^(bullish|bearish)$/.test(c.direction)).slice(0, 8).map((c) => ({ ...c, horizon: HZ[c.horizon] ? c.horizon : "mo", quote: String(c.quote || "").slice(0, 180) })), via: "ai" };
+    } catch (e) { return { claims: fallbackExtract(text), via: "rules (AI reply unusable)" }; }
   }
-  return out;
-}
-function M2Chart({ m2, btc, accent, height = 280 }) {
-  const W = 1000, H = height, padT = 16, padB = 20, padL = 8, padR = 8;
-  const n = m2.length;
-  const norm = (a) => { const lo = Math.min(...a), hi = Math.max(...a); return a.map((v) => (v - lo) / (hi - lo || 1)); };
-  const nm = norm(m2), nb = norm(btc);
-  const x = (i) => padL + (i / (n - 1)) * (W - padL - padR);
-  const y = (v) => padT + (1 - v) * (H - padT - padB);
-  const line = (arr) => window.smoothPath ? window.smoothPath(arr.map((v, i) => [x(i), y(v)]), 0.5)
-    : arr.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }}>
-      <path d={line(nm)} fill="none" stroke="currentColor" strokeOpacity="0.5" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-      <path d={line(nb)} fill="none" stroke={accent} strokeWidth="2.4" vectorEffect="non-scaling-stroke" />
-    </svg>
-  );
-}
 
-// ---- mini sparkline that fills its cell ----
-function MacroSpark({ pts, color, height = 34 }) {
-  const W = 120, H = height;
-  const lo = Math.min(...pts), hi = Math.max(...pts);
-  const x = (i) => (i / (pts.length - 1)) * W;
-  const y = (v) => H - 2 - ((v - lo) / (hi - lo || 1)) * (H - 4);
-  const d = window.smoothPath ? window.smoothPath(pts.map((v, i) => [x(i), y(v)]), 0.5)
-    : pts.map((v, i) => `${i ? "L" : "M"}${x(i)},${y(v)}`).join(" ");
-  return <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: H, display: "block" }}>
-    <path d={d} fill="none" stroke={color} strokeWidth="1.6" vectorEffect="non-scaling-stroke" /></svg>;
-}
-
-// ---- big area chart (net liquidity) ----
-function LiquidityChart({ pts, accent, height = 260 }) {
-  const W = 1000, H = height, padT = 14, padB = 24, padL = 56, padR = 12;
-  const lo = Math.min(...pts) * 0.99, hi = Math.max(...pts) * 1.005;
-  const x = (i) => padL + (i / (pts.length - 1)) * (W - padL - padR);
-  const y = (v) => padT + (1 - (v - lo) / (hi - lo || 1)) * (H - padT - padB);
-  const line = window.smoothPath ? window.smoothPath(pts.map((v, i) => [x(i), y(v)]), 0.5)
-    : pts.map((v, i) => `${i ? "L" : "M"}${x(i)},${y(v)}`).join(" ");
-  const area = `${line} L${x(pts.length - 1).toFixed(1)},${H - padB} L${x(0).toFixed(1)},${H - padB} Z`;
-  const gid = "lqg";
-  const ticks = [lo, (lo + hi) / 2, hi];
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }}>
-      <defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor={accent} stopOpacity="0.20" /><stop offset="100%" stopColor={accent} stopOpacity="0" />
-      </linearGradient></defs>
-      {ticks.map((v, i) => (<g key={i}>
-        <line x1={padL} y1={y(v)} x2={W - padR} y2={y(v)} stroke="currentColor" strokeOpacity="0.08" />
-        <text x={padL - 8} y={y(v) + 4} textAnchor="end" className="mc-ytick">${(v / 1000).toFixed(2)}T</text>
-      </g>))}
-      <path d={area} fill={`url(#${gid})`} />
-      <path d={line} fill="none" stroke={accent} strokeWidth="2.2" vectorEffect="non-scaling-stroke" />
-    </svg>
-  );
-}
-
-// ---- yield-curve mini (2y vs 10y) ----
-function YieldCurve({ y2, y10, accent }) {
-  const spread = y10 - y2;
-  const inverted = spread < 0;
-  const pts = [{ l: "3M", v: y2 + 0.15 }, { l: "2Y", v: y2 }, { l: "5Y", v: (y2 + y10) / 2 - 0.05 }, { l: "10Y", v: y10 }, { l: "30Y", v: y10 + 0.25 }];
-  const W = 300, H = 130, padL = 30, padB = 22, padT = 10, padR = 10;
-  const lo = Math.min(...pts.map((p) => p.v)) - 0.2, hi = Math.max(...pts.map((p) => p.v)) + 0.2;
-  const x = (i) => padL + (i / (pts.length - 1)) * (W - padL - padR);
-  const y = (v) => padT + (1 - (v - lo) / (hi - lo || 1)) * (H - padT - padB);
-  const d = window.smoothPath ? window.smoothPath(pts.map((p, i) => [x(i), y(p.v)]), 0.5) : pts.map((p, i) => `${i ? "L" : "M"}${x(i)},${y(p.v)}`).join(" ");
-  return (
-    <div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 130, display: "block" }}>
-        <path d={d} fill="none" stroke={inverted ? mDOWN : accent} strokeWidth="2.2" vectorEffect="non-scaling-stroke" />
-        {pts.map((p, i) => (<g key={p.l}>
-          <circle cx={x(i)} cy={y(p.v)} r="3" fill={inverted ? mDOWN : accent} />
-          <text x={x(i)} y={H - 6} textAnchor="middle" className="mc-ytick">{p.l}</text>
-        </g>))}
-      </svg>
-      <div className="mc-curve-read" style={{ color: inverted ? mDOWN : mUP }}>
-        {inverted ? "▼ Inverted" : "▲ Normal"} · 10Y−2Y spread {spread >= 0 ? "+" : ""}{(spread * 100).toFixed(0)} bps
-      </div>
-      <div className="mc-curve-note">{inverted
-        ? "An inverted curve has historically preceded recessions — the classic fixed-income warning (Séance 10)."
-        : "An upward-sloping curve signals normal growth expectations."}</div>
-    </div>
-  );
-}
-
-// ---- default geopolitical / economist feed (mock) — themed on the CIO June 2026 risks ----
-const MOCK_NEWS = [
-  { headline: "Strait of Hormuz tensions keep a risk premium in crude", source: "Reuters", tone: -2.1, tag: "Geopolitics" },
-  { headline: "New Fed chair Warsh signals patience on rate cuts amid sticky core CPI", source: "Bloomberg", tone: -0.8, tag: "Monetary" },
-  { headline: "AI capex cycle broadens beyond mega-cap; concentration risk debated", source: "FT", tone: 0.6, tag: "Equities" },
-  { headline: "Emerging-market earnings revisions turn positive, valuations in line with history", source: "MSCI", tone: 1.4, tag: "Equities" },
-  { headline: "Gold extends gains as central banks keep accumulating reserves", source: "WGC", tone: 1.1, tag: "Commodities" },
-  { headline: "Canadian dollar firms on stronger commodity terms of trade", source: "BoC", tone: 0.5, tag: "FX" },
-];
-function getNews() {
-  const live = window.HelmFeed && window.HelmFeed.news;
-  if (live && live.length) {
-    return live.filter((n) => n.headline).slice(0, 8).map((n) => ({
-      headline: n.headline, source: n.source || "—", tone: n.tone || 0,
-      tag: n.ticker && n.ticker !== "MACRO" ? n.ticker : "Macro",
-    }));
+  // ---- scoring: a claim resolves at its horizon; right if the sign matches the move beyond noise ----
+  function scoreClaim(c) {
+    const lp = lastPrice(c.ticker);
+    if (!lp || !c.p0) return { ...c, status: "untracked" };
+    const move = (lp.p / c.p0 - 1) * 100;
+    const ageD = Math.round((Date.now() - new Date(c.d).getTime()) / 86400000);
+    const hz = HZ[c.horizon] || HZ.mo;
+    const cal = Math.round(hz.days * 1.45);
+    if (ageD < cal) return { ...c, status: "open", move, ageD, dueD: cal - ageD, real: lp.real };
+    const signed = c.direction === "bullish" ? move : -move;
+    return { ...c, status: signed >= hz.bar ? "right" : signed <= -hz.bar ? "wrong" : "flat", move, ageD, real: lp.real };
   }
-  return MOCK_NEWS;
-}
 
-function MacroModule({ accent }) {
-  const [tab, setTab] = useStateM("regime");
-  const [lag, setLag] = useStateM(10);
-  const m = getMacro();
-  const news = getNews();
-  const m2 = globalM2Series();
-  const btc = btcVsM2(m2, lag);
-  const m2Chg = (last(m2) / m2[0] - 1) * 100;
+  function credibility(J) {
+    const by = {};
+    J.claims.map(scoreClaim).forEach((c) => {
+      const b = by[c.src] = by[c.src] || { n: 0, open: 0, right: 0, wrong: 0, flat: 0 };
+      b.n++;
+      if (c.status === "open" || c.status === "untracked") b.open++;
+      else b[c.status] = (b[c.status] || 0) + 1;
+    });
+    Object.keys(by).forEach((s) => { const b = by[s]; const res = b.right + b.wrong + b.flat; b.score = res >= 3 ? Math.round((b.right + b.flat * 0.5) / res * 100) : null; });
+    return by;
+  }
 
-  const nl = m.netLiquidity, nlLast = last(nl), nlChg = (nlLast / nl[0] - 1) * 100;
-  const liqRising = nlChg >= 0;
-  const y10 = last(m.us10y), y2 = last(m.us2y), spread = y10 - y2;
-  const cpiNow = last(m.cpi), oilNow = last(m.oil), ffNow = last(m.fedFunds), unNow = last(m.unemployment);
+  // ---- Helm cross-check: re-derive the claim's chart from REAL data (we can't read
+  // video pixels — and shouldn't: their chart may be cherry-picked; the tape isn't) ----
+  function helmRead(ticker) {
+    try {
+      const t2 = window.HelmOdds && window.HelmOdds.trend2(ticker);
+      const o = window.HelmOdds && window.HelmOdds.compute(ticker);
+      const m1 = o && o.horizons ? o.horizons.find((h) => h.k === "1mo") : null;
+      const e = window.HelmSigma ? window.HelmSigma.compute(ticker) : null;
+      if (!t2) return null;
+      let pts = (t2.secular.up ? 1 : 0) + (t2.weekly.up ? 1 : 0), n = 2;
+      if (m1 && m1.pUp != null) { pts += m1.pUp >= 55 ? 1 : m1.pUp <= 45 ? 0 : 0.5; n++; }
+      return { bull: pts / n, sec: t2.secular.up, wk: t2.weekly.up, pUp: m1 ? m1.pUp : null, z: e ? e.z : null, real: !!t2.real };
+    } catch (err) { return null; }
+  }
+  function crossCheck(c) {
+    const r = helmRead(c.ticker);
+    if (!r) return null;
+    const agree = c.direction === "bullish" ? (r.bull >= 0.65 ? 1 : r.bull <= 0.35 ? -1 : 0) : (r.bull <= 0.35 ? 1 : r.bull >= 0.65 ? -1 : 0);
+    const bits = [`sec${r.sec ? "▲" : "▼"}`, `wk${r.wk ? "▲" : "▼"}`];
+    if (r.pUp != null) bits.push(`P(up)1mo ${r.pUp.toFixed(0)}%`);
+    if (r.z != null) bits.push(`${r.z >= 0 ? "+" : ""}${r.z.toFixed(1)}σ`);
+    return { agree, txt: bits.join(" · ") + (r.real ? "" : " · demo"), col: agree > 0 ? "#0e9f6e" : agree < 0 ? "#e02424" : "#b45309", label: agree > 0 ? "data agrees" : agree < 0 ? "data disagrees" : "data mixed" };
+  }
 
-  // economist read — synthesized from the indicators
-  const posBits = [];
-  posBits.push(liqRising ? "expanding liquidity is a tailwind for risk assets" : "contracting net liquidity is a headwind for risk assets");
-  posBits.push(spread < 0 ? "an inverted curve flags late-cycle risk" : "a normal curve supports the growth view");
-  posBits.push(cpiNow > 3 ? "inflation above target keeps the Fed cautious" : "inflation near target gives the Fed room");
-  const stance = (liqRising ? 1 : -1) + (spread < 0 ? -1 : 1) + (cpiNow > 3 ? -1 : 1);
-  const posture = stance >= 2 ? ["Constructive", mUP] : stance <= -1 ? ["Cautious", mDOWN] : ["Balanced", mWARN];
+  function VeraIntake({ accent }) {
+    const [text, setText] = useVkState("");
+    const [src, setSrc] = useVkState("");
+    const [url, setUrl] = useVkState("");
+    const [fbusy, setFbusy] = useVkState(false);
+    const [fnote, setFnote] = useVkState("");
+    const [ferr, setFerr] = useVkState("");
+    const [busy, setBusy] = useVkState(false);
+    const [draft, setDraft] = useVkState(null); // {claims, via}
+    const [, force] = useVkState(0);
+    const J = load();
+    const scored = J.claims.map(scoreClaim).sort((a, b) => (b.d > a.d ? 1 : -1));
+    const cred = credibility(J);
 
-  const INDICATORS = [
-    { label: "Fed net liquidity", val: `$${(nlLast / 1000).toFixed(2)}T`, chg: nlChg, pts: nl, color: accent, note: "balance sheet − RRP − TGA" },
-    { label: "10Y Treasury", val: `${y10.toFixed(2)}%`, chg: chg(m.us10y) * 100, pts: m.us10y, color: "#4f46e5", note: "bps over window", unit: "bps" },
-    { label: "2Y Treasury", val: `${y2.toFixed(2)}%`, chg: chg(m.us2y) * 100, pts: m.us2y, color: "#0891b2", note: "bps over window", unit: "bps" },
-    { label: "CPI (YoY)", val: `${cpiNow.toFixed(1)}%`, chg: chg(m.cpi), pts: m.cpi, color: mWARN, note: "vs 2% target", inv: true },
-    { label: "Fed funds", val: `${ffNow.toFixed(2)}%`, chg: chg(m.fedFunds), pts: m.fedFunds, color: "#7c3aed", note: "policy rate" },
-    { label: "Unemployment", val: `${unNow.toFixed(1)}%`, chg: chg(m.unemployment), pts: m.unemployment, color: "#64748b", note: "U-3 rate", inv: true },
-    { label: "WTI crude", val: `$${oilNow.toFixed(0)}`, chg: (oilNow / m.oil[0] - 1) * 100, pts: m.oil, color: "#d97706", note: "Hormuz premium" },
-  ];
+    async function run(tOverride) {
+      const body = tOverride != null ? tOverride : text;
+      if (!body.trim()) return;
+      setBusy(true);
+      const r = await extract(body);
+      setDraft(r); setBusy(false);
+    }
 
-  return (
-    <div className="mc">
-      <style>{`.mc-tabs{display:flex;gap:8px;margin-bottom:16px}.mc-tabs button{font:inherit;font-size:13px;font-weight:600;color:var(--ink-2);background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:8px 14px;cursor:pointer}.mc-tabs button:hover{border-color:var(--muted)}`}</style>
-      <div className="mc-tabs">
-        <button className={tab === "regime" ? "is-active" : ""} onClick={() => setTab("regime")} style={tab === "regime" ? { borderColor: accent, color: accent } : {}}>Economic CIO &amp; geopolitics</button>
-        <button className={tab === "indicators" ? "is-active" : ""} onClick={() => setTab("indicators")} style={tab === "indicators" ? { borderColor: accent, color: accent } : {}}>Liquidity &amp; indicators</button>
-      </div>
+    async function fetchLink() {
+      const id = (url.match(/(?:v=|youtu\.be\/|shorts\/|embed\/|live\/)([\w-]{11})/) || [])[1];
+      if (!id) { setFerr("That doesn't look like a YouTube link — paste the share link (youtu.be/…) or the full watch URL."); return; }
+      setFbusy(true); setFerr("");
+      try {
+        const base = (window.HELM_TRANSCRIPT_BASE || "").replace(/\/+$/, "");
+        let j, vis = null;
+        if (base) {
+          // transcript + vision lanes in parallel; vision is best-effort
+          const [tRes, vRes] = await Promise.allSettled([
+            fetch(`${base}/?v=${id}`).then((r) => r.json()),
+            fetch(`${base}/frames?v=${id}`).then((r) => r.json()),
+          ]);
+          if (tRes.status !== "fulfilled" || !tRes.value.text) throw new Error((tRes.status === "fulfilled" && tRes.value.error) || "worker returned no transcript");
+          j = tRes.value;
+          if (vRes.status === "fulfilled" && vRes.value.vision && Array.isArray(vRes.value.reads) && vRes.value.reads.length) vis = vRes.value.reads;
+        } else {
+          // no worker configured — best-effort public reader (works for many videos, not all)
+          const r = await fetch(`https://r.jina.ai/https://www.youtube.com/watch?v=${id}`, { headers: { accept: "text/plain" } });
+          if (!r.ok) throw new Error("public reader unavailable");
+          const t = await r.text();
+          if (t.trim().length < 400) throw new Error("public reader returned too little text");
+          j = { text: t.slice(0, 30000), channel: "", title: "" };
+        }
+        if (j.channel || j.title) setSrc(j.channel || j.title);
+        setFnote(`${j.channel || j.title || "video"} · ${j.asr ? "auto-captions (audio, speech-to-text)" : "transcript"} · ${(j.text.length / 1000).toFixed(1)}k chars${vis ? ` · 👁 ${vis.length} on-screen chart${vis.length > 1 ? "s" : ""} read by vision` : ""}`);
+        let body = j.text;
+        if (vis) body += "\n\n[ON-SCREEN CHARTS — read by vision from the video frames]\n" + vis.map((r2) => `(${r2.t}) ${r2.read}`).join("\n");
+        setText(body);
+        await run(body);
+      } catch (e) {
+        setFerr(`Couldn't fetch that video (${e.message}). ${(window.HELM_TRANSCRIPT_BASE || "") ? "" : "For reliable link fetching, deploy feed/transcript-worker.js — a free 2-minute Cloudflare Worker, same account as your quotes worker — and set HELM_TRANSCRIPT_BASE in feed-config.js. "}Meanwhile: YouTube → ⋯ → Show transcript → copy–paste below.`);
+      } finally { setFbusy(false); }
+    }
+    function commit() {
+      if (!draft || !draft.claims.length) { setDraft(null); return; }
+      const J2 = load();
+      const s = src.trim() || "unnamed source";
+      draft.claims.forEach((c) => {
+        const lp = lastPrice(c.ticker);
+        J2.claims.push({ id: uid(), src: s, d: today(), via: draft.via, ...c, p0: lp ? lp.p : null });
+      });
+      J2.claims = J2.claims.slice(-200);
+      save(J2); setDraft(null); setText(""); force((n) => n + 1);
+    }
+    function drop(id) { const J2 = load(); J2.claims = J2.claims.filter((c) => c.id !== id); save(J2); force((n) => n + 1); }
 
-      {tab === "regime" && window.CioMacroPanel && <div style={{ marginBottom: 16 }}><window.CioMacroPanel accent={accent} account="all" /></div>}
-      {tab === "regime" && window.RegimePanel && <window.RegimePanel accent={accent} />}
-      {tab === "regime" && (
-      <section className="pm-card mc-read" style={{ marginTop: 16 }}>
-        <div className="mc-read-l">
-          <div className="pm-card-eyebrow">Macro read · the economist's view {m.live ? "· live data" : "· demo data"}</div>
-          <div className="mc-posture" style={{ color: posture[1] }}>{posture[0]}</div>
-          <p className="mc-read-txt">With {posBits[0]}, {posBits[1]}, and {posBits[2]}. Net liquidity is {liqRising ? "rising" : "falling"} ({nlChg >= 0 ? "+" : ""}{nlChg.toFixed(1)}% over the window), the 10Y−2Y spread sits at {spread >= 0 ? "+" : ""}{(spread * 100).toFixed(0)} bps, and WTI carries a geopolitical premium near ${oilNow.toFixed(0)}.</p>
-        </div>
-        <div className="mc-read-r">
-          <div className="mc-read-stat"><span>Liquidity trend</span><strong style={{ color: liqRising ? mUP : mDOWN }}>{liqRising ? "Expanding" : "Contracting"}</strong></div>
-          <div className="mc-read-stat"><span>Yield curve</span><strong style={{ color: spread < 0 ? mDOWN : mUP }}>{spread < 0 ? "Inverted" : "Normal"}</strong></div>
-        </div>
-      </section>
-      )}
+    const stTag = (c) => c.status === "right" ? ["✓ right", "#0e9f6e"] : c.status === "wrong" ? ["✗ wrong", "#e02424"] : c.status === "flat" ? ["— flat", "var(--muted)"] : c.status === "untracked" ? ["no price", "var(--muted)"] : [`open · ${c.dueD}d left`, "#b45309"];
 
-      {tab === "indicators" && <>
-
-      {/* liquidity model — the Raoul Pal lens */}
-      <section className="pm-card">
-        <div className="pm-card-head">
-          <div>
-            <div className="pm-card-eyebrow">Global liquidity model</div>
-            <div className="mc-liq-sub">Fed net liquidity (balance sheet − reverse repo − TGA) — the dominant driver of risk-asset cycles.</div>
+    return (
+      <div className="vk">
+        <section className="pm-card">
+          <div className="pm-card-eyebrow">Vera · intake — YouTube / podcast / research notes</div>
+          <div className="vk-sub">Paste a YouTube link or transcript. Vera pulls out the <strong>testable claims</strong> (name + direction), marks each to the tape today, and scores the source as claims age past their horizon. The audio is covered by the transcript; for on-screen charts she doesn't trust the video's pixels — she <strong>re-derives the chart from real data</strong> (trend, σ-band, base-rate odds) and flags whether it agrees.</div>
+          <div className="vk-form">
+            <div className="vk-linkrow">
+              <input className="vk-src" style={{ flex: 1 }} placeholder="YouTube link — paste the share link (https://youtu.be/…) and Vera does the rest" value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") fetchLink(); }} />
+              <button className="vk-go" style={{ background: accent }} disabled={fbusy || busy || !url.trim()} onClick={fetchLink}>{fbusy ? "Fetching…" : busy ? "Extracting…" : "Fetch & analyse"}</button>
+            </div>
+            {ferr && <div className="vk-ferr">{ferr}</div>}
+            {fnote && !ferr && <div className="vk-fnote mono">{fnote}</div>}
+            <div className="vk-or mono">or paste a transcript / your notes manually ↓</div>
+            <input className="vk-src" placeholder="Source (channel / author — e.g. 'Real Vision', 'InvestAnswers')" value={src} onChange={(e) => setSrc(e.target.value)} />
+            <textarea className="vk-text" rows={6} placeholder="Paste the transcript or your summary of the video here… (YouTube: ··· → Show transcript → copy)" value={text} onChange={(e) => setText(e.target.value)}></textarea>
+            <div className="vk-actions">
+              <button className="vk-go" style={{ background: accent }} disabled={busy || fbusy || !text.trim()} onClick={() => run()}>{busy ? "Extracting…" : "Extract claims"}</button>
+              <span className="vk-hint mono">{(window.helmAI || (window.claude && window.claude.complete)) ? "AI extraction · rule fallback" : "rule-based extraction (no AI available here)"}</span>
+            </div>
           </div>
-          <div className="mc-liq-val" style={{ color: liqRising ? mUP : mDOWN }}>${(nlLast / 1000).toFixed(2)}T <span>{nlChg >= 0 ? "+" : ""}{nlChg.toFixed(1)}%</span></div>
-        </div>
-        <div className="mc-chart" style={{ color: "var(--ink)" }}><LiquidityChart pts={nl} accent={accent} /></div>
-        <div className="mc-foot-note">When net liquidity expands, risk assets (equities, crypto) tend to follow with a lag; contraction tightens financial conditions. This is the core of the liquidity-cycle framework.</div>
-      </section>
+          {draft && (
+            <div className="vk-draft">
+              <div className="vk-draft-h">{draft.claims.length ? `${draft.claims.length} testable claim${draft.claims.length > 1 ? "s" : ""} found` : "No testable claims found"} <em>· via {draft.via}</em></div>
+              {draft.claims.map((c, i) => {
+                const xc = crossCheck(c);
+                return (
+                <div className="vk-claim" key={i}>
+                  <b className="mono">{c.ticker}</b>
+                  <span className="vk-dir" style={{ color: c.direction === "bullish" ? "#0e9f6e" : "#e02424" }}>{c.direction}</span>
+                  <span className="mono vk-hz">{HZ[c.horizon].label}</span>
+                  <span className="vk-qwrap"><span className="vk-q">“{c.quote}”</span>
+                  {xc && <span className="vk-xc mono" style={{ color: xc.col }} title="Helm re-derives the chart from the real price series — secular/weekly trend, 1-month base-rate odds, σ vs index"><b>{xc.label}</b> · {xc.txt}</span>}</span>
+                  <button className="vk-x" onClick={() => setDraft({ ...draft, claims: draft.claims.filter((_, j2) => j2 !== i) })}>✕</button>
+                </div>
+                );
+              })}
+              <div className="vk-actions">
+                {draft.claims.length > 0 && <button className="vk-go" style={{ background: "#0e9f6e" }} onClick={commit}>Track these</button>}
+                <button className="vk-cancel" onClick={() => setDraft(null)}>Discard</button>
+              </div>
+            </div>
+          )}
+        </section>
 
-      {/* Global M2 — the Raoul Pal lens */}
-      <section className="pm-card">
-        <div className="pm-card-head">
-          <div>
-            <div className="pm-card-eyebrow">Global M2 liquidity · the liquidity-cycle lens</div>
-            <div className="mc-liq-sub">Global M2 (US + China + Eurozone + Japan + UK money supply, in USD) leads Bitcoin by ~10–12 weeks — the dominant driver of the crypto/risk cycle.</div>
-          </div>
-          <div className="mc-m2-ctrl">
-            <span className="mc-m2-lagval" style={{ color: accent }}>${(last(m2) / 1000).toFixed(1)}T <span>{m2Chg >= 0 ? "+" : ""}{m2Chg.toFixed(1)}%</span></span>
-            <div className="pm-range mc-m2-seg">
-              {[8, 10, 12].map((w) => (
-                <button key={w} className={lag === w ? "is-active" : ""} onClick={() => setLag(w)}>{w}w lag</button>
+        {Object.keys(cred).length > 0 && (
+          <section className="pm-card">
+            <div className="pm-card-eyebrow">Source credibility</div>
+            <div className="vk-cred">
+              {Object.entries(cred).sort((a, b) => (b[1].score ?? -1) - (a[1].score ?? -1)).map(([s, b]) => (
+                <div className="vk-cred-row" key={s}>
+                  <span className="vk-cred-src">{s}</span>
+                  <span className="mono vk-cred-n">{b.n} claim{b.n > 1 ? "s" : ""} · {b.open} open</span>
+                  {b.score != null
+                    ? <span className="vk-cred-score mono" style={{ color: b.score >= 60 ? "#0e9f6e" : b.score <= 40 ? "#e02424" : "#b45309" }}>{b.score}% hit</span>
+                    : <span className="vk-cred-score mono" style={{ color: "var(--muted)" }}>needs ≥3 resolved</span>}
+                  <span className="vk-cred-bar"><i style={{ width: (b.score ?? 0) + "%", background: b.score >= 60 ? "#0e9f6e" : b.score <= 40 ? "#e02424" : "#b45309" }} /></span>
+                </div>
               ))}
             </div>
-          </div>
-        </div>
-        <div className="mc-legend2">
-          <span><i style={{ background: "var(--muted)" }} /> Global M2 (leads)</span>
-          <span><i style={{ background: accent }} /> Bitcoin (follows, {lag}-week lag)</span>
-        </div>
-        <div className="mc-chart" style={{ color: "var(--ink)" }}><M2Chart m2={m2} btc={btc} accent={accent} /></div>
-        <div className="mc-foot-note">Raoul Pal's thesis: monetary expansion — not headlines — drives Bitcoin's long-term path, with global M2 explaining the bulk of moves at a ~{lag}-week lead. <strong>Caveat:</strong> critics note the relationship is sensitive to the chosen lag and reporting-frequency mismatches, so treat it as a cycle compass, not a precise timing tool.</div>
-      </section>
+            <div className="vk-note">Hit = direction right beyond noise ({HZ.wk.bar}% / {HZ.mo.bar}% / {HZ.qtr.bar}% by horizon) at the claim's horizon; flat counts half. Credibility should gate how much weight a source gets at the round table.</div>
+          </section>
+        )}
 
-      <div className="mc-cols">
-        {/* indicators grid */}
-        <section className="pm-card">
-          <div className="pm-card-eyebrow">Key indicators</div>
-          <div className="mc-grid">
-            {INDICATORS.map((it) => {
-              const up = it.chg >= 0;
-              const good = it.inv ? !up : up;
-              return (
-                <div className="mc-ind" key={it.label}>
-                  <div className="mc-ind-top">
-                    <span className="mc-ind-label">{it.label}</span>
-                    <span className="mc-ind-chg" style={{ color: good ? mUP : mDOWN }}>{up ? "▲" : "▼"} {Math.abs(it.chg).toFixed(it.unit === "bps" ? 0 : 1)}{it.unit === "bps" ? "bps" : "%"}</span>
+        {scored.length > 0 && (
+          <section className="pm-card">
+            <div className="pm-card-eyebrow">Claim ledger · {scored.length}</div>
+            <div className="vk-ledger">
+              {scored.slice(0, 40).map((c) => {
+                const [l, col] = stTag(c);
+                return (
+                  <div className="vk-row" key={c.id}>
+                    <span className="mono vk-row-d">{c.d.slice(5)}</span>
+                    <b className="mono vk-row-t" onClick={() => window.dispatchEvent(new CustomEvent("helm:nav", { detail: { page: "Research", ticker: c.ticker } }))}>{c.ticker}</b>
+                    <span style={{ color: c.direction === "bullish" ? "#0e9f6e" : "#e02424" }}>{c.direction}</span>
+                    <span className="mono vk-row-mv" style={{ color: (c.move ?? 0) >= 0 ? "#0e9f6e" : "#e02424" }}>{c.move != null ? (c.move > 0 ? "+" : "") + c.move.toFixed(1) + "%" : "—"}</span>
+                    <span className="vk-row-st mono" style={{ color: col }}>{l}</span>
+                    <span className="vk-row-src">{c.src}</span>
+                    <button className="vk-x" onClick={() => drop(c.id)} title="remove">✕</button>
                   </div>
-                  <div className="mc-ind-val">{it.val}</div>
-                  <MacroSpark pts={it.pts} color={it.color} />
-                  <div className="mc-ind-note">{it.note}</div>
-                </div>
-              );
-            })}
-            <div className="mc-ind mc-ind-curve">
-              <div className="mc-ind-label">Yield curve</div>
-              <YieldCurve y2={y2} y10={y10} accent={accent} />
+                );
+              })}
             </div>
-          </div>
-        </section>
-
-        {/* geopolitical / news feed */}
-        <section className="pm-card mc-feed-card">
-          <div className="pm-card-eyebrow">Geopolitical & market feed</div>
-          <div className="mc-feed">
-            {news.map((n, i) => {
-              const tone = n.tone || 0;
-              const tc = tone > 0.5 ? mUP : tone < -0.5 ? mDOWN : "var(--muted)";
-              return (
-                <div className="mc-news" key={i}>
-                  <div className="mc-news-top">
-                    <span className="mc-news-tag" style={{ color: accent }}>{n.tag}</span>
-                    <span className="mc-news-tone" style={{ color: tc }} title="sentiment tone">{tone > 0.5 ? "▲" : tone < -0.5 ? "▼" : "—"}</span>
-                  </div>
-                  <div className="mc-news-h">{n.headline}</div>
-                  <div className="mc-news-src">{n.source}</div>
-                </div>
-              );
-            })}
-          </div>
-          <div className="mc-foot-note">{m.live ? "Live headlines via the feed (GDELT + Finnhub)." : "Demo headlines — connect the feed for live GDELT + Finnhub events."}</div>
-        </section>
+          </section>
+        )}
       </div>
-      </>}
-    </div>
-  );
-}
+    );
+  }
 
-window.MacroModule = MacroModule;
+  const VK_CSS = `
+  .vk { display: flex; flex-direction: column; gap: 14px; }
+  .vk-sub { font-size: 12.5px; color: var(--ink-2); line-height: 1.55; margin: 6px 0 12px; max-width: 70ch; }
+  .vk-form { display: flex; flex-direction: column; gap: 8px; }
+  .vk-linkrow { display: flex; gap: 8px; align-items: stretch; }
+  .vk-ferr { font-size: 11px; color: #b45309; background: #b453090f; border: 1px solid #b4530933; border-radius: 8px; padding: 7px 10px; line-height: 1.5; }
+  .vk-fnote { font-size: 10px; color: #0e9f6e; }
+  .vk-or { font-size: 9.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .vk-src, .vk-text { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; }
+  .vk-text { resize: vertical; line-height: 1.5; }
+  .vk-src:focus, .vk-text:focus { outline: none; border-color: var(--muted); }
+  .vk-actions { display: flex; align-items: center; gap: 12px; }
+  .vk-go { font: inherit; font-size: 12.5px; font-weight: 700; color: #fff; border: 0; border-radius: 8px; padding: 7px 15px; cursor: pointer; }
+  .vk-go:disabled { opacity: 0.45; cursor: default; }
+  .vk-cancel { font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-2); background: none; border: 1px solid var(--line); border-radius: 8px; padding: 7px 13px; cursor: pointer; }
+  .vk-hint { font-size: 10px; color: var(--muted); }
+  .vk-draft { border-top: 1px solid var(--line-2, #f0f2f5); margin-top: 12px; padding-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+  .vk-draft-h { font-size: 12.5px; font-weight: 700; }
+  .vk-draft-h em { font-weight: 400; font-style: normal; color: var(--muted); font-size: 11px; }
+  .vk-claim { display: flex; align-items: baseline; gap: 9px; font-size: 12px; }
+  .vk-claim b { flex: none; }
+  .vk-dir { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; flex: none; }
+  .vk-hz { font-size: 10px; color: var(--muted); flex: none; }
+  .vk-qwrap { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .vk-q { color: var(--ink-2); font-size: 11.5px; line-height: 1.45; }
+  .vk-xc { font-size: 10px; }
+  .vk-xc b { font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+  .vk-x { font: inherit; font-size: 11px; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 0 2px; margin-left: auto; flex: none; }
+  .vk-x:hover { color: #e02424; }
+  .vk-cred { display: flex; flex-direction: column; gap: 7px; margin-top: 8px; }
+  .vk-cred-row { display: grid; grid-template-columns: minmax(120px, 1fr) auto auto 130px; gap: 12px; align-items: center; font-size: 12px; }
+  .vk-cred-n { font-size: 10.5px; color: var(--muted); }
+  .vk-cred-score { font-size: 11.5px; font-weight: 700; }
+  .vk-cred-bar { height: 5px; background: var(--line-2, #f0f2f5); border-radius: 99px; overflow: hidden; }
+  .vk-cred-bar i { display: block; height: 100%; border-radius: 99px; }
+  .vk-note { font-size: 10.5px; color: var(--muted); line-height: 1.5; margin-top: 10px; }
+  .vk-ledger { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+  .vk-row { display: grid; grid-template-columns: 40px 64px 58px 58px 110px 1fr 20px; gap: 8px; align-items: baseline; font-size: 11.5px; padding: 5px 0; border-bottom: 1px solid var(--line-2, #f0f2f5); }
+  .vk-row:last-child { border-bottom: 0; }
+  .vk-row-d { color: var(--muted); font-size: 10px; }
+  .vk-row-t { cursor: pointer; }
+  .vk-row-t:hover { text-decoration: underline; }
+  .vk-row-mv, .vk-row-st { font-size: 10.5px; }
+  .vk-row-src { color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  `;
+  if (!document.getElementById("helm-vk-css")) {
+    const el = document.createElement("style"); el.id = "helm-vk-css"; el.textContent = VK_CSS; document.head.appendChild(el);
+  }
+
+  window.HelmIntake = { load, scoreClaim, credibility };
+  window.VeraIntake = VeraIntake;
+})();

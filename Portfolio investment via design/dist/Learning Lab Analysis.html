@@ -1,442 +1,49 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>AI Learning Lab — Architect's Analysis</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --accent: #0e9f6e; --bad: #e02424; --warn: #d97706;
-  --ui: "IBM Plex Sans", system-ui, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, monospace;
-  --bg: #f4f6f8; --panel: #ffffff; --panel-2: #f8f9fb;
-  --ink: #121820; --ink-2: #475063; --muted: #818b99;
-  --line: #e8ebef; --line-2: #f0f2f5;
-}
-html, body { background: var(--bg); }
-body { font-family: var(--ui); color: var(--ink); font-size: 14px; -webkit-font-smoothing: antialiased; line-height: 1.5; }
-.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.wrap { max-width: 1200px; margin: 0 auto; padding: 40px 32px 80px; }
+name: Helm daily feed (slow lane)
 
-/* header */
-.head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-bottom: 22px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
-.head h1 { font-size: 27px; font-weight: 700; letter-spacing: -0.025em; }
-.head .sub { color: var(--ink-2); font-size: 14px; margin-top: 6px; max-width: 700px; line-height: 1.55; }
-.badge { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 5px 10px; border: 1px solid var(--line); border-radius: 99px; white-space: nowrap; flex: none; }
+# Heavy data once a day — history, fundamentals, macro, liquidity model, news.
+# Quotes are handled separately by the Cloudflare Worker (feed/quotes-worker.js).
+# Paths are auto-located so this works whether the project sits at the repo root
+# or inside a subfolder.
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"   # 21:30 UTC, weekdays (~after US market close)
+  workflow_dispatch: {}        # allow manual runs from the Actions tab
 
-.section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 600; margin: 0 0 16px; }
+permissions:
+  contents: write
 
-/* verdict */
-.verdict-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 36px; }
-.verdict-card { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; padding: 18px 20px; }
-.verdict-card.highlight { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, white); }
-.verdict-card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 8px; }
-.verdict-card p { font-size: 13.5px; color: var(--ink); line-height: 1.55; }
-.verdict-card strong { color: var(--accent); }
-.verdict-card .warn-txt { color: var(--warn); }
-.verdict-card .bad-txt { color: var(--bad); }
+# Prevent overlapping runs (e.g. a manual re-run firing while another is still
+# ingesting) from racing to push and rejecting each other.
+concurrency:
+  group: helm-daily-feed
+  cancel-in-progress: false
 
-/* pros/cons */
-.pc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 40px; }
-.pc-col { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; padding: 20px; }
-.pc-col h3 { font-size: 13px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
-.pc-col h3 .dot { width: 9px; height: 9px; border-radius: 50%; }
-ul.pc { list-style: none; }
-ul.pc li { position: relative; padding-left: 20px; margin-bottom: 9px; font-size: 13px; line-height: 1.45; color: var(--ink-2); }
-ul.pc.pro li::before { content: "+"; position: absolute; left: 0; font-weight: 700; color: var(--accent); font-family: var(--mono); }
-ul.pc.con li::before { content: "−"; position: absolute; left: 0; font-weight: 700; color: var(--bad); font-family: var(--mono); }
-.kw { font-weight: 600; color: var(--ink); }
-.tag { font-family: var(--mono); font-size: 10.5px; background: var(--line-2); color: var(--ink-2); padding: 1px 6px; border-radius: 5px; }
-
-/* gate analysis */
-.gate { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; padding: 22px; margin-bottom: 40px; }
-.gate-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
-.gate-badge { background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; padding: 4px 12px; border-radius: 99px; text-transform: uppercase; letter-spacing: 0.05em; }
-.gate-title { font-size: 16px; font-weight: 700; }
-.gate-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.gate-item { border: 1px solid var(--line); border-radius: 9px; padding: 13px 15px; }
-.gate-item .gi-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 5px; }
-.gate-item .gi-val { font-size: 13.5px; font-weight: 600; }
-.gate-item .gi-note { font-size: 12px; color: var(--ink-2); margin-top: 4px; line-height: 1.4; }
-.gate-item.ok { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); background: color-mix(in srgb, var(--accent) 4%, white); }
-.gate-item.ok .gi-val { color: var(--accent); }
-
-/* incorporate table */
-.inc-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 40px; }
-.inc { display: grid; grid-template-columns: 34px 1fr 1fr 120px; gap: 16px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
-.inc .num { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; font-weight: 700; font-family: var(--mono); font-size: 13px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); flex: none; }
-.inc h4 { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
-.inc .desc { font-size: 12.5px; color: var(--ink-2); }
-.inc .helm { font-size: 12px; color: var(--muted); }
-.inc .pri-col { justify-self: end; }
-.pill { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 4px 9px; border-radius: 99px; }
-.pill.now { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
-.pill.next { background: color-mix(in srgb, #2563eb 12%, transparent); color: #2563eb; }
-.pill.later { background: var(--line-2); color: var(--muted); }
-.pill.skip { background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--bad); }
-
-/* skip table */
-.skip-table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 13px; overflow: hidden; margin-bottom: 40px; }
-.skip-table th, .skip-table td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--line-2); font-size: 13px; }
-.skip-table thead th { background: var(--panel-2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
-.skip-table tr:last-child td { border-bottom: 0; }
-.skip-table td:first-child { font-weight: 600; color: var(--ink); }
-.skip-table td.reason { color: var(--ink-2); }
-.skip-table td.alt { color: var(--accent); font-size: 12.5px; }
-
-/* what changes in existing */
-.existing-block { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; padding: 22px; margin-bottom: 40px; display: flex; flex-direction: column; gap: 14px; }
-.existing-row { display: flex; gap: 14px; align-items: flex-start; padding: 11px 0; border-bottom: 1px solid var(--line-2); }
-.existing-row:last-child { border-bottom: 0; }
-.existing-row .file { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); padding: 3px 8px; border-radius: 6px; white-space: nowrap; flex: none; }
-.existing-row .what { font-size: 13px; color: var(--ink-2); flex: 1; }
-.existing-row .what strong { color: var(--ink); }
-.existing-row .change-badge { flex: none; }
-.cb-none { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 99px; }
-.cb-extend { background: color-mix(in srgb, #2563eb 12%, transparent); color: #2563eb; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 99px; }
-
-/* phase plan */
-.phases { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 40px; }
-.phase { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
-.phase-num { font-family: var(--mono); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; }
-.phase-title { font-size: 14px; font-weight: 700; margin: 4px 0 10px; }
-.phase ul { list-style: none; font-size: 12.5px; color: var(--ink-2); display: flex; flex-direction: column; gap: 5px; }
-.phase ul li { padding-left: 14px; position: relative; }
-.phase ul li::before { content: "→"; position: absolute; left: 0; color: var(--muted); font-size: 11px; top: 2px; }
-.phase.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, white); }
-.phase.active .phase-title { color: var(--accent); }
-
-@media (max-width: 900px) { .verdict-row, .pc-grid, .gate-grid, .phases { grid-template-columns: 1fr; } .inc { grid-template-columns: 34px 1fr; } .inc .pri-col { grid-column: 2; } }
-</style>
-</head>
-<body>
-<div class="wrap">
-
-  <div class="head">
-    <div>
-      <h1>AI Learning Lab — Architect's analysis</h1>
-      <div class="sub">The spec proposes a walk-forward portfolio simulator with model versioning, MIT bucket learning, and macro-season testing. This doc lays out what's strong, what's unrealistic for Helm's current architecture, what to incorporate, and — critically — what it does <em>not</em> touch in the existing engine.</div>
-    </div>
-    <div class="badge">Architect's review · Jun 2026</div>
-  </div>
-
-  <!-- verdict row -->
-  <div class="section-label">Verdict</div>
-  <div class="verdict-row" style="margin-bottom:36px">
-    <div class="verdict-card highlight">
-      <h3>What it is</h3>
-      <p>A <strong>walk-forward backtester + model versioning registry</strong>. The core idea is sound: run the existing model on historical data, measure it honestly, propose rule tweaks, test them out-of-sample, accept or reject. This is exactly what Phase 4 (A-Light learning loop) is scaffolded for.</p>
-    </div>
-    <div class="verdict-card">
-      <h3>What it isn't</h3>
-      <p>It's <span class="warn-txt font-bold">not an AI</span> in the generative sense — it's deterministic rule-based simulation + KPI evaluation. Sections calling it "AI Learning" are marketing language. The actual mechanism is: run rules on history, score them, tweak, repeat. That's honest and achievable.</p>
-    </div>
-    <div class="verdict-card">
-      <h3>Realism check</h3>
-      <p>The spec assumes a <span class="bad-txt font-bold">backend server</span>, 20 SQL tables, background job queues, 300 assets with 5yr history, and 7 separate engines. <strong>Helm is a static HTML app.</strong> That gap matters. We don't discard the ideas — we adapt the architecture.</p>
-    </div>
-  </div>
-
-  <!-- pros/cons -->
-  <div class="section-label">Pros &amp; cons of the spec</div>
-  <div class="pc-grid">
-    <div class="pc-col">
-      <h3><span class="dot" style="background:#0e9f6e"></span> Strengths — what the spec gets right</h3>
-      <ul class="pc pro">
-        <li><span class="kw">Walk-forward methodology is correct.</span> Oldest 50% train, newest 50% out-of-sample, day-by-day, no future leakage. This is the only honest way to validate a signal.</li>
-        <li><span class="kw">Model versioning is excellent.</span> v0.1.0 Base → incremental versions → rollback. Exactly what A-Light needs to graduate from "proposed" to "accepted."</li>
-        <li><span class="kw">MIT bucket × macro regime scoring matrix</span> (section 9) is immediately usable — it maps directly onto regime.jsx and plan.jsx already built.</li>
-        <li><span class="kw">Acceptance/rejection rules are rigorous.</span> Sharpe +5%, drawdown doesn't worsen, multi-asset validation, regime diversity. Prevents overfitting a single ticker.</li>
-        <li><span class="kw">Improvement log format</span> (section 16) is excellent — the structured "Finding / Proposed improvement / Result / Decision" format is ready to adopt into the Learning tab today.</li>
-        <li><span class="kw">KPI hierarchy is correct.</span> Risk-adjusted return (Sharpe/Sortino/Calmar) ranks above raw CAGR. Turnover and fees are first-class. This matches Helm's institutional scorecard.</li>
-        <li><span class="kw">Learning Controller Stop/Pause/Reset/Rollback</span> matches A-Light's manual-approval philosophy exactly.</li>
-        <li><span class="kw">MVP phase plan is pragmatic.</span> Start with 5–15 tickers, one risk model, daily simulation. Scale later. Don't build 300 assets first.</li>
-        <li><span class="kw">Anti-overfitting controls</span> are well-designed: multi-asset, multi-regime, multi-time-window validation before acceptance.</li>
-      </ul>
-    </div>
-    <div class="pc-col">
-      <h3><span class="dot" style="background:#e02424"></span> Weaknesses — what the spec gets wrong</h3>
-      <ul class="pc con">
-        <li><span class="kw">Architecture mismatch.</span> The spec assumes a backend (20 SQL tables, job queues, API endpoints, incremental imports). Helm is a static single-file HTML app. That's a different product category.</li>
-        <li><span class="kw">300-asset daily simulation is not browser-feasible.</span> 300 assets × 5 years × 252 days = ~378,000 daily simulation steps × scoring logic = browser lockup. Needs a Web Worker at minimum.</li>
-        <li><span class="kw">Massively redundant with Helm.</span> Macro Seasons Engine = regime.jsx (done). MIT buckets = plan.jsx (done). Risk models = strategy.jsx (done). Learning tab = learning.jsx (done). The spec reinvents all of these.</li>
-        <li><span class="kw">Data dependency is unsolved.</span> Historical daily OHLCV for 300 assets requires a proper data pipeline. Our feed has ~109 tickers at EOD. The spec doesn't provide the data — it just assumes it's there.</li>
-        <li><span class="kw">"AI Learning" is misleading branding.</span> There is no neural network, no gradient descent, no parameter update. It's rule engineering + backtesting. That's fine — but calling it an "AI Learning Lab" overstates what it does and risks false confidence.</li>
-        <li><span class="kw">LLM overuse in the simulation loop.</span> The spec suggests using Claude for summarizing findings, proposing changes, writing logs — but warns against calling LLM per-day/ticker. The boundary is underspecified and could get expensive.</li>
-        <li><span class="kw">Sections 20–22 (DB schema, backend APIs, background jobs)</span> are irrelevant for Helm's static architecture. They describe a SaaS product, not an HTML prototype.</li>
-        <li><span class="kw">Crypto High Conviction risk model</span> (75% crypto max) in a research/simulation tool is dangerous — it could generate misleading "improvements" that only work in bull markets.</li>
-        <li><span class="kw">Transaction import complexity</span> (Mode A: reconstruct from buy/sell dates, FX, fees, dividends) is a large separate project and not essential for the MVP value.</li>
-      </ul>
-    </div>
-  </div>
-
-  <!-- gate impact -->
-  <div class="section-label">Gate impact — what changes in the existing engine?</div>
-  <div class="gate">
-    <div class="gate-head">
-      <div class="gate-badge">✓ Zero gate changes</div>
-      <div class="gate-title">The spec explicitly prohibits modifying the existing engine. It is registered as v0.1.0 and runs as-is forever as the baseline.</div>
-    </div>
-    <p style="font-size:13.5px;color:var(--ink-2);margin-bottom:18px;max-width:900px;">The Learning Lab is a <strong>sandboxed parallel environment</strong>. It calls the existing <span class="tag">signalsFor()</span>, <span class="tag">scoreFamilies()</span>, and <span class="tag">classifyRegime()</span> functions as read-only oracles — the baseline it measures against. Candidate improvements are tested inside the simulator only. Nothing reaches the live Strategy Lab, Cockpit, or Screener until you manually approve it via the Learning tab's existing A-Light proposal flow.</p>
-    <div class="gate-grid">
-      <div class="gate-item ok">
-        <div class="gi-label">strategy.jsx / signalsFor()</div>
-        <div class="gi-val">No change — becomes v0.1.0</div>
-        <div class="gi-note">Called by the simulator as the baseline model. Output is compared vs candidate; never overwritten automatically.</div>
-      </div>
-      <div class="gate-item ok">
-        <div class="gi-label">regime.jsx / classifyRegime()</div>
-        <div class="gi-val">No change — feeds the simulator</div>
-        <div class="gi-note">Already classifies growth × inflation → season. Simulator reads HelmRegime to tag each simulated trade with the macro season at that date.</div>
-      </div>
-      <div class="gate-item ok">
-        <div class="gi-label">plan.jsx / bucketOf()</div>
-        <div class="gi-val">No change — MIT mapping already exists</div>
-        <div class="gi-note">The spec's "MIT bucket" = Helm's "Volatile Offense / Satellite / Core Growth / Ballast" structure. Already computed. The scoring matrix (+2/+1/0/-1/-2) extends it, not replaces it.</div>
-      </div>
-      <div class="gate-item ok">
-        <div class="gi-label">learning.jsx / reflexion ledger</div>
-        <div class="gi-val">Extended, not replaced</div>
-        <div class="gi-note">The existing A-Light ledger (predicted vs realized, drift, proposals) becomes the receiver for simulator output. The log format from section 16 of the spec slots directly into the existing improvement log structure.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- what to incorporate -->
-  <div class="section-label">What I'd incorporate — prioritized</div>
-  <div class="inc-list">
-    <div class="inc">
-      <div class="num">1</div>
-      <div>
-        <h4>Walk-forward engine (MVP: 15 tickers, Web Worker)</h4>
-        <div class="desc">Runs the existing <span class="tag">signalsFor()</span> day-by-day on a 2yr price history split 50/50. Records predicted direction vs actual close. Stores to <span class="tag">helm_sim_v1</span> localStorage. Runs in a Web Worker so the UI stays live. This is the core value of the entire spec.</div>
-      </div>
-      <div>
-        <div class="helm">Phase 1 MVP. Uses existing signals engine as v0.1.0 baseline. No new data sources needed beyond what the feed already provides.</div>
-      </div>
-      <div class="pri-col"><span class="pill now">Build first</span></div>
-    </div>
-    <div class="inc">
-      <div class="num">2</div>
-      <div>
-        <h4>Model version registry</h4>
-        <div class="desc">v0.1.0 = current <span class="tag">signalsFor()</span>. Every accepted tweak to factor weights, buy bar, or RSI thresholds creates a new version with full KPI before/after. Stored in localStorage. The existing Learning tab already shows proposals — version registry is the missing upgrade.</div>
-      </div>
-      <div>
-        <div class="helm">Extends learning.jsx. The "accepted improvements" flow already exists. Adds version numbering, rollback, and diff view.</div>
-      </div>
-      <div class="pri-col"><span class="pill now">Build first</span></div>
-    </div>
-    <div class="inc">
-      <div class="num">3</div>
-      <div>
-        <h4>MIT bucket × macro season scoring matrix</h4>
-        <div class="desc">The spec's section 9 (+2/+1/0/-1/-2 per regime per bucket) is immediately valuable and can be a static table that the simulator tests against historical regime classifications. Ties directly into regime.jsx's season work.</div>
-      </div>
-      <div>
-        <div class="helm">New section in regime.jsx or plan.jsx. Already have the 4-season framework — this adds the asset-class performance expectations the spec formalizes.</div>
-      </div>
-      <div class="pri-col"><span class="pill now">Build first</span></div>
-    </div>
-    <div class="inc">
-      <div class="num">4</div>
-      <div>
-        <h4>Improvement log (spec's section 16 format)</h4>
-        <div class="desc">Adopt the structured log format: Finding / Proposed improvement / Result / Decision / Reason. Replace the current plain-text proposals in learning.jsx with this richer format. Every accepted or rejected change is permanently logged.</div>
-      </div>
-      <div>
-        <div class="helm">Minor extension to learning.jsx proposals section. The data structure already exists in A-Light — this just formalizes the schema.</div>
-      </div>
-      <div class="pri-col"><span class="pill now">Build first</span></div>
-    </div>
-    <div class="inc">
-      <div class="num">5</div>
-      <div>
-        <h4>KPI comparison table (candidate vs baseline vs benchmarks)</h4>
-        <div class="desc">The simulator's output surface: existing model vs candidate vs buy-and-hold vs benchmark, with Sharpe / Sortino / Calmar / max DD / turnover / fees. Acceptance/rejection rules shown explicitly. Central to the spec's value.</div>
-      </div>
-      <div>
-        <div class="helm">New section inside the Learning tab (or Backtest tab). Simulated, not live — clearly labelled as research only.</div>
-      </div>
-      <div class="pri-col"><span class="pill next">Phase 2</span></div>
-    </div>
-    <div class="inc">
-      <div class="num">6</div>
-      <div>
-        <h4>Learning Controller (Start/Pause/Stop/Reset/Rollback)</h4>
-        <div class="desc">UI controls for the simulation: Quick Test (15 tickers, 3 iterations), Medium (50 tickers, 10 iterations), Full (needs confirmation). Run progress, elapsed time, current asset, accepted/rejected counters.</div>
-      </div>
-      <div>
-        <div class="helm">New "Learning Lab" section. Could replace Backtest tab or extend it.</div>
-      </div>
-      <div class="pri-col"><span class="pill next">Phase 2</span></div>
-    </div>
-    <div class="inc">
-      <div class="num">7</div>
-      <div>
-        <h4>Portfolio equity curve comparison</h4>
-        <div class="desc">AI-managed sim vs baseline vs buy-and-hold plotted over the out-of-sample period. Uses the Catmull-Rom chart already in charts.jsx. Drawdown curve alongside.</div>
-      </div>
-      <div>
-        <div class="helm">Extends charts.jsx. Data comes from the walk-forward engine snapshots stored in localStorage.</div>
-      </div>
-      <div class="pri-col"><span class="pill next">Phase 2</span></div>
-    </div>
-    <div class="inc">
-      <div class="num">8</div>
-      <div>
-        <h4>Return by macro regime / MIT bucket heatmap</h4>
-        <div class="desc">How did each risk model perform in Spring vs Summer vs Fall vs Winter? Which MIT bucket had the best/worst regime fit? This is the spec's most unique analytical value.</div>
-      </div>
-      <div>
-        <div class="helm">Phase 3, after walk-forward engine is running and generating enough trade history to slice by regime.</div>
-      </div>
-      <div class="pri-col"><span class="pill later">Phase 3</span></div>
-    </div>
-  </div>
-
-  <!-- what to skip -->
-  <div class="section-label">What to skip — and why</div>
-  <table class="skip-table">
-    <thead><tr><th>Spec section</th><th>Why skip</th><th>Alternative in Helm</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>Backend DB (20 tables, SQL)</td>
-        <td class="reason">Helm is a static HTML app with no server. A 20-table SQL schema requires infrastructure that doesn't exist and contradicts the zero-cost architecture.</td>
-        <td class="alt">localStorage + JSON. Enough for 30-snapshot journals, version history, and sim results for a solo investor. Add IndexedDB if data grows.</td>
-      </tr>
-      <tr>
-        <td>Background job queues / API endpoints</td>
-        <td class="reason">No backend = no job queues. These are a SaaS architecture concern, not a single-user browser app.</td>
-        <td class="alt">Web Worker for simulation (non-blocking, runs in background, posts progress messages to UI — same user experience).</td>
-      </tr>
-      <tr>
-        <td>300-asset universe import</td>
-        <td class="reason">No free source of 300× daily OHLCV at the resolution needed. The feed has ~109 positions EOD. Adding 300 requires a paid data vendor.</td>
-        <td class="alt">Use the 109 held positions + Screener universe (47 names already seeded). Cap MVP at ~30 tickers. Scale with the feed as it grows.</td>
-      </tr>
-      <tr>
-        <td>Mode A: transaction reconstruction</td>
-        <td class="reason">Reconstructing portfolio value from every buy/sell/dividend/FX/deposit transaction is a large separate project. You'd need full NBDB transaction exports and a reconciliation engine.</td>
-        <td class="alt">Mode B (current holdings backcast) is simpler and gives 90% of the analytical value for discovering model weaknesses.</td>
-      </tr>
-      <tr>
-        <td>Crypto High Conviction risk model (75% crypto)</td>
-        <td class="reason">A model that recommends 75% crypto during a bull market backtest will always look good — it's selection bias built into the risk preset. Dangerous for validation.</td>
-        <td class="alt">Use the existing 3 risk models (Conservative/Balanced/Aggressive). The Aggressive model at 30% volatile-offense cap is already aggressive enough.</td>
-      </tr>
-      <tr>
-        <td>"AI" branding throughout</td>
-        <td class="reason">The mechanism is deterministic rule-based backtesting, not machine learning. Calling it AI creates false confidence in results.</td>
-        <td class="alt">Call it "Walk-Forward Simulator" or "Strategy Validator." Reserve "AI" label for the actual Claude calls that summarize findings and write the improvement log.</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <!-- existing files impact -->
-  <div class="section-label">Impact on existing Helm files — the full map</div>
-  <div class="existing-block">
-    <div class="existing-row">
-      <div class="file">strategy.jsx</div>
-      <div class="what"><strong>No changes.</strong> <span class="tag">signalsFor()</span> and <span class="tag">scoreFamilies()</span> become the v0.1.0 baseline. The simulator calls them as read-only oracles and compares candidates against their output. Never overwritten automatically.</div>
-      <div class="change-badge"><span class="cb-none">No change</span></div>
-    </div>
-    <div class="existing-row">
-      <div class="file">regime.jsx</div>
-      <div class="what"><strong>No changes.</strong> <span class="tag">classifyRegime()</span> is used by the simulator to tag each simulated trade with the macro season. The MIT × season scoring matrix (section 9 of spec) gets added as a new <em>read-only static table</em> — not a change to the classifier.</div>
-      <div class="change-badge"><span class="cb-none">No change</span></div>
-    </div>
-    <div class="existing-row">
-      <div class="file">learning.jsx</div>
-      <div class="what"><strong>Extended.</strong> The improvement log format is upgraded to the spec's structured schema (Finding / Proposed change / KPI before/after / Decision). The reflexion ledger gains a "from simulator" source tag. The version registry panel is added. Core A-Light logic unchanged.</div>
-      <div class="change-badge"><span class="cb-extend">Extend only</span></div>
-    </div>
-    <div class="existing-row">
-      <div class="file">backtest.jsx</div>
-      <div class="what"><strong>Extended or replaced</strong> by the new Learning Lab module. Current backtest is a deterministic curve on your holdings. The simulator adds the walk-forward, version comparison, and candidate model testing on top. Existing backtest chart is reused inside the new UI.</div>
-      <div class="change-badge"><span class="cb-extend">Extend only</span></div>
-    </div>
-    <div class="existing-row">
-      <div class="file">plan.jsx</div>
-      <div class="what"><strong>No changes.</strong> The "Volatile Offense / Satellite / Core Growth / Ballast" bucket structure is Helm's MIT equivalent. The simulator reads <span class="tag">bucketOf(h)</span> to tag trades. No modifications to Plan or the funded-ratio engine.</div>
-      <div class="change-badge"><span class="cb-none">No change</span></div>
-    </div>
-    <div class="existing-row">
-      <div class="file">screener.jsx</div>
-      <div class="what"><strong>No changes.</strong> <span class="tag">window.HelmUniverse</span> is already exposed. The simulator reads it as the candidate universe for buy signals. The Screener UI itself doesn't change.</div>
-      <div class="change-badge"><span class="cb-none">No change</span></div>
-    </div>
-    <div class="existing-row">
-      <div class="file">app.jsx nav</div>
-      <div class="what"><strong>Minor.</strong> "Backtest" in the Understand group is renamed or expanded to "Strategy Validator" once the new module is built. One label change, same route.</div>
-      <div class="change-badge"><span class="cb-extend">Label only</span></div>
-    </div>
-  </div>
-
-  <!-- build phases -->
-  <div class="section-label">Proposed build phases</div>
-  <div class="phases">
-    <div class="phase active">
-      <div class="phase-num">Phase 1</div>
-      <div class="phase-title">Walk-forward MVP</div>
-      <ul>
-        <li>15 tickers (your held names)</li>
-        <li>Existing model as v0.1.0</li>
-        <li>2yr history from feed</li>
-        <li>50/50 train/test split</li>
-        <li>Day-by-day signal replay</li>
-        <li>Predicted vs realized log</li>
-        <li>Stop/Reset controls</li>
-        <li>Basic KPI (Sharpe, DD, win rate)</li>
-      </ul>
-    </div>
-    <div class="phase">
-      <div class="phase-num">Phase 2</div>
-      <div class="phase-title">Version registry + KPI table</div>
-      <ul>
-        <li>Model version registry (v0.1.0 baseline)</li>
-        <li>Candidate vs baseline KPI table</li>
-        <li>Acceptance/rejection logic</li>
-        <li>Structured improvement log</li>
-        <li>Equity curve comparison chart</li>
-        <li>Rollback to previous version</li>
-      </ul>
-    </div>
-    <div class="phase">
-      <div class="phase-num">Phase 3</div>
-      <div class="phase-title">MIT + macro season analysis</div>
-      <ul>
-        <li>MIT × macro scoring matrix</li>
-        <li>Return by regime / bucket heatmap</li>
-        <li>Regime tagging on every trade</li>
-        <li>Drawdown by MIT bucket</li>
-        <li>Best/worst regime per bucket</li>
-      </ul>
-    </div>
-    <div class="phase">
-      <div class="phase-num">Phase 4</div>
-      <div class="phase-title">Scale + full controller</div>
-      <ul>
-        <li>50+ tickers (Screener universe)</li>
-        <li>Multiple risk models</li>
-        <li>Web Worker (non-blocking)</li>
-        <li>Quick / Medium / Full run modes</li>
-        <li>Claude for improvement log writing</li>
-        <li>Anti-overfitting validation</li>
-      </ul>
-    </div>
-  </div>
-
-  <div style="font-size:12px;color:var(--muted);text-align:center;line-height:1.6;max-width:800px;margin:0 auto;">
-    The spec's 1,481 lines contain real engineering wisdom. The right move is to extract the methodology (walk-forward, versioning, acceptance rules, log format) and adapt it to Helm's actual architecture — not implement the spec as written. The existing engine is untouched. The lab is a sandboxed research surface that feeds proposals back to you for manual approval.
-  </div>
-
-</div>
-<template id="__bundler_thumbnail">
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#0e9f6e"/><text x="50" y="62" font-size="38" text-anchor="middle" fill="#fff">🔬</text></svg>
-</template>
-</body>
-</html>
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Locate and run ingestion (pure stdlib)
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+        run: |
+          F=$(find . -name ingest.py -path '*feed*' | head -1)
+          echo "Running $F"
+          python "$F"
+      - name: Commit snapshots
+        run: |
+          git config user.name "helm-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git commit -m "feed: $(date -u +%FT%TZ)" || echo "no changes"
+          # rebase onto whatever is newest on main before pushing, retrying a
+          # few times in case another run (or a manual upload) landed first.
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main && git push && break
+            echo "push rejected, retrying ($i)..."
+            sleep $((RANDOM % 10 + 3))
+          done

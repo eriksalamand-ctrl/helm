@@ -1,68 +1,158 @@
-# Reference frameworks — extracted from the user's NBC/BNC "Finance 101" course decks
-# (Pierre Laroche, Banque Nationale Marchés financiers). Use these to ground the app's
-# Strategy Lab, Performance, and Macro modules in real institutional methodology.
+// analysis.jsx — AI-assisted technical chart analysis (uses window.claude.complete).
+// Computes local technicals, then asks Claude for a concise read. Falls back to a
+// rule-based read when the AI helper isn't available.
+const { useState: useStateA } = React;
 
-## Portfolio-management process (Séances 16-17 — La gestion de portefeuille)
-1. **Design** — investment objectives: return target, risk, correlation. Approach (traditional / quant / mixed).
-2. **Policy** — define the investment universe; how the "best" assets are selected; how capital is
-   allocated ("diversification is the only free lunch"); **rebalancing + profit-taking + stop-loss rules**.
-3. **Monitoring** — market events, corporate actions, volatility spikes, policy/regulatory compliance, efficient execution.
-4. **Performance evaluation** (see Session 18).
-5. **Communication** — to investors and regulators.
+function aSMA(arr, n) { if (arr.length < n) return null; const s = arr.slice(-n); return s.reduce((a, b) => a + b, 0) / n; }
+function aRSI(arr, period = 14) {
+  if (arr.length < period + 1) return 50;
+  let g = 0, l = 0;
+  for (let i = arr.length - period; i < arr.length; i++) { const d = arr[i] - arr[i - 1]; if (d >= 0) g += d; else l -= d; }
+  const ag = g / period, al = l / period; if (al === 0) return 100; return 100 - 100 / (1 + ag / al);
+}
+function aSlope(arr) { // % per the window, via simple endpoints of a smoothed tail
+  if (arr.length < 2) return 0;
+  const tail = arr.slice(-Math.min(30, arr.length));
+  return (tail[tail.length - 1] / tail[0] - 1) * 100;
+}
+function aVol(arr) {
+  const r = []; for (let i = 1; i < arr.length; i++) r.push(arr[i] / arr[i - 1] - 1);
+  const m = r.reduce((a, b) => a + b, 0) / (r.length || 1);
+  const sd = Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / (r.length || 1));
+  return sd * Math.sqrt(252) * 100;
+}
 
-### Diversification & allocation
-- Portfolio return = weighted avg; risk depends on **correlations** (between −1 and +1). Lower correlation → lower risk.
-- ~90% of diversification benefit is reached with ~20 stocks.
-- Long-run stock/bond correlation ≈ 0 but swings between −0.8 and +0.8.
-- Concentration risk is real (Japan 40% of MSCI World in 1989; BlackBerry ~50% of SPTSX60; mega-cap 5 ≈ 22% of S&P 500).
+function technicals(series, price) {
+  const last = price || series[series.length - 1];
+  const hi = Math.max(...series), lo = Math.min(...series);
+  const sma20 = aSMA(series, 20), sma50 = aSMA(series, 50);
+  const rsi = aRSI(series);
+  const slope = aSlope(series);
+  const vol = aVol(series);
+  const recent = series.slice(-60);
+  const support = Math.min(...recent), resistance = Math.max(...recent);
+  return {
+    last, hi, lo, sma20, sma50, rsi, slope, vol, support, resistance,
+    fromHigh: (last / hi - 1) * 100,
+    aboveSma50: sma50 != null ? last >= sma50 : null,
+    trend: slope > 4 ? "up" : slope < -4 ? "down" : "sideways",
+  };
+}
 
-### Active management
-- **Strategic Asset Allocation (SAA)** — long-term (3-5 yr) divergence from benchmark weights.
-- **Tactical Asset Allocation (TAA)** — short-term (3-12 mo): e.g. add equities after an exaggerated drop (mean-reversion), FX hedge around elections.
+function ruleRead(t, ticker) {
+  const bits = [];
+  bits.push(`${ticker} is in a ${t.trend === "up" ? "rising" : t.trend === "down" ? "falling" : "range-bound"} trend (${t.slope >= 0 ? "+" : ""}${t.slope.toFixed(1)}% over the recent window).`);
+  if (t.rsi > 70) bits.push(`RSI ${t.rsi.toFixed(0)} is overbought — momentum is stretched.`);
+  else if (t.rsi < 30) bits.push(`RSI ${t.rsi.toFixed(0)} is oversold — watch for a bounce.`);
+  else bits.push(`RSI ${t.rsi.toFixed(0)} is neutral.`);
+  if (t.aboveSma50 === true) bits.push("Price sits above its 50-day average (constructive).");
+  else if (t.aboveSma50 === false) bits.push("Price sits below its 50-day average (cautious).");
+  bits.push(`Support near $${t.support.toFixed(2)}, resistance near $${t.resistance.toFixed(2)}. Annualized volatility ≈ ${t.vol.toFixed(0)}%.`);
+  bits.push(`It is ${Math.abs(t.fromHigh).toFixed(0)}% ${t.fromHigh < 0 ? "below" : "at/above"} its window high.`);
+  return bits.join(" ");
+}
 
-### Risk profiling (regulator-required questionnaire)
-- **Tolerance** — do you sleep well when markets are volatile?
-- **Capacity** — function of financial cushion + age.
-- **Knowledge** — more informed → can take more risk.
-- Behavioral-finance definition of risk: **probability of NOT reaching your financial goals** (and how far short).
-- A "decision grid" maps the risk profile to one of **6-8 model portfolios**, from "liquidity" (very prudent) to 90%+ equities.
+const A_HORIZONS = [
+  { id: "day",  label: "Day trade", desc: "intraday · hours", out: "OUTLOOK (today / intraday)" },
+  { id: "swing", label: "Swing", desc: "days to weeks", out: "OUTLOOK (days–weeks)" },
+  { id: "position", label: "Position", desc: "weeks to months", out: "OUTLOOK (weeks–months)" },
+  { id: "long", label: "Long-term", desc: "months to a year+", out: "OUTLOOK (months–year)" },
+];
 
-## Performance evaluation (Session 18)
-Three approaches:
-1. **vs peers** — stable above-median returns, ideally risk-adjusted.
-2. **vs benchmark**
-   - **Value Added (VA)** = avg portfolio return − avg benchmark return.
-   - **Active share** = sum of |weight differences| (measures conviction / departure from benchmark).
-   - **Tracking error** = RMSE = std dev of Value Added.
-   - **Information Ratio (IR)** = VA / Tracking error. Good: **0.5+ equities, 0.75+ fixed income**.
-3. **vs itself**
-   - **Sharpe ratio** = (avg portfolio return − risk-free rate) / std dev. (Deck uses **Rf = 2.5%**.)
-   - **Omega ratio** = expected upside (vs a target) / expected |downside|. Better than Sharpe — doesn't assume Gaussian returns.
+function ChartAnalysis({ series, ticker, name, sector, accent }) {
+  const [state, setState] = useStateA("idle"); // idle | loading | done | error
+  const [text, setText] = useStateA("");
+  const [horizon, setHorizon] = useStateA("position");
+  const t = technicals(series);
+  const hz = A_HORIZONS.find((h) => h.id === horizon) || A_HORIZONS[2];
 
-### Sources of alpha (documented)
-New issues (not in benchmarks); M&A / special situations; access to small & mid caps; SAA (incl. dynamic
-risk management like stop-loss); TAA; capturing the negative alpha of other managers.
-Low-cost ETFs are purging "closet indexers" (high fees for near-benchmark portfolios).
+  async function analyze() {
+    setState("loading"); setText("");
+    const horizonLine = horizon === "day"
+      ? "The investor is DAY-TRADING: intraday horizon (minutes to hours, flat by close). Focus on intraday momentum, opening range, VWAP-style levels, and tight risk."
+      : horizon === "swing"
+      ? "The investor is SWING-TRADING: holding days to a few weeks. Focus on the short-term trend, breakouts/pullbacks and near-term levels."
+      : horizon === "position"
+      ? "The investor holds POSITIONS for weeks to months (no day-trading). Focus on the primary trend, the 50-day average and swing levels."
+      : "The investor is LONG-TERM: months to a year or more. Focus on the major trend, higher-timeframe structure and whether dips are buyable.";
+    const prompt = {
+      messages: [{
+        role: "user",
+        content: `You are a disciplined technical analyst. ${horizonLine} Analyze ${ticker} (${name}, ${sector}).
 
-## How this maps into Helm (the app)
-- **Strategy Lab** — risk models = the 6-8 "decision grid" tiers; surface Tolerance/Capacity/Knowledge.
-  TAA "add after exaggerated drop" = the mean-reversion buy signal; stop-loss rules already present.
-- **Performance / Rendement** — add the institutional scorecard: Sharpe (Rf 2.5%), Information Ratio,
-  Active Share, Tracking Error, Omega — vs S&P 500 / Nasdaq.
-- **Macro module (future)** — "Ce qui fait bouger les marchés" (Séance 08), fixed income & yield curves
-  (Séance 10), commodities (Séance 12), FX & money markets (Session 09) → the indicators feeding posture.
+Indicators (price in native currency):
+- Last: ${t.last.toFixed(2)}
+- Trend: ${t.trend} (${t.slope.toFixed(1)}% over recent window)
+- RSI(14): ${t.rsi.toFixed(0)}
+- 50-day avg: ${t.sma50 ? t.sma50.toFixed(2) : "n/a"} (price is ${t.aboveSma50 ? "above" : "below"})
+- Support: ${t.support.toFixed(2)}, Resistance: ${t.resistance.toFixed(2)}
+- Annualized volatility: ${t.vol.toFixed(0)}%
+- Distance from window high: ${t.fromHigh.toFixed(0)}%
 
-## NBC CIO long-term market forecasts (Prévisions de marché à long terme — spring 2026, as of 31 Mar 2026)
-10-year expected annual returns (the basis of strategic asset allocation):
-- **Balanced reference portfolio: 4.8%/yr** (vs 8.3% realized over the last 10y; was 4.3% in fall 2025).
-  Balanced = 18% S&P/TSX, 24% S&P 500, 12% MSCI EAFE, 6% MSCI EM, 40% Canada Universe bonds (CAD).
-- **Equities (benchmark): 5.5%/yr** (30% TSX, 40% S&P 500, 20% EAFE, 10% EM). EM most favourable (strong
-  earnings growth, P/E in line with history).
-- **Canadian fixed income: 3.7%/yr** (≈ current yield-to-maturity).
-- 30-year horizon: balanced ~6.7%, equities ~8.2%.
-→ Used in Projections as the realistic "market" baseline (5.5%) the 60%/yr target is measured against.
+Write a concise read with exactly these short sections, each one line:
+TREND: ...
+LEVELS: ...
+MOMENTUM: ...
+${hz.out}: ...
+RISK: ...
+Keep under 130 words total. End with: "Not financial advice."`,
+      }],
+    };
+    try {
+      if (!window.claude || !window.claude.complete) throw new Error("no-ai");
+      const out = await window.claude.complete(prompt);
+      setText(out || ruleRead(t, ticker)); setState("done");
+    } catch (e) {
+      setText(ruleRead(t, ticker)); setState("done");
+    }
+  }
 
-## NBC CIO asset-allocation views (June 2026 — "Le chemin de l'inconfort")
-Overweight equities; watch geopolitics (Strait of Hormuz/Iran), inflation & the new Fed chair (Kevin Warsh),
-and AI-concentration risk. Tilts: Equities OW, Fixed income UW, Alternatives OW; US + EM overweight; Credit OW,
-Duration UW; Gold + uncorrelated strategies OW. → Drives the CIO Macro View panel in the Strategy Lab.
+  // render AI text: bold the SECTION: labels
+  function render(txt) {
+    return txt.split("\n").filter((l) => l.trim()).map((line, i) => {
+      const m = line.match(/^([A-Z][A-Z ()0-9-]+):\s*(.*)$/);
+      if (m) return <p key={i} className="an-line"><span className="an-key">{m[1]}</span> {m[2]}</p>;
+      return <p key={i} className="an-line">{line}</p>;
+    });
+  }
+
+  return (
+    <section className="pm-card an-card">
+      <div className="pm-card-head">
+        <div>
+          <div className="pm-card-eyebrow">AI chart analysis</div>
+          <div className="an-sub">Technical read of {ticker} — <strong style={{ color: accent }}>{hz.label}</strong> timeframe ({hz.desc}).</div>
+        </div>
+        <button className="an-btn" onClick={analyze} disabled={state === "loading"} style={{ background: accent }}>
+          {state === "loading" ? "Analyzing…" : state === "done" ? "Re-analyze" : "Analyze chart"}
+        </button>
+      </div>
+
+      <div className="an-hz">
+        <span className="an-hz-label">Trade horizon</span>
+        <div className="an-hz-seg">
+          {A_HORIZONS.map((h) => (
+            <button key={h.id} className={horizon === h.id ? "is-active" : ""} onClick={() => setHorizon(h.id)} title={h.desc}>{h.label}</button>
+          ))}
+        </div>
+        <span className="an-hz-desc">{hz.desc}</span>
+      </div>
+
+      {/* quick technical chips — always visible */}
+      <div className="an-chips">
+        <span className="an-chip" style={{ color: t.trend === "up" ? "#0e9f6e" : t.trend === "down" ? "#e02424" : "var(--ink-2)" }}>Trend {t.trend}</span>
+        <span className="an-chip" style={{ color: t.rsi > 70 ? "#e02424" : t.rsi < 30 ? "#0e9f6e" : "var(--ink-2)" }}>RSI {t.rsi.toFixed(0)}</span>
+        <span className="an-chip">vs 50d {t.aboveSma50 == null ? "—" : t.aboveSma50 ? "above" : "below"}</span>
+        <span className="an-chip">S ${t.support.toFixed(2)}</span>
+        <span className="an-chip">R ${t.resistance.toFixed(2)}</span>
+        <span className="an-chip">σ {t.vol.toFixed(0)}%</span>
+      </div>
+
+      {state === "loading" && <div className="an-loading">Reading the chart…</div>}
+      {state === "done" && <div className="an-out">{render(text)}</div>}
+      {state === "idle" && <div className="an-hint">Click <strong>Analyze chart</strong> for an AI technical read (trend, levels, momentum, 1-4 week outlook, key risk).</div>}
+    </section>
+  );
+}
+
+window.ChartAnalysis = ChartAnalysis;
