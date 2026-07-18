@@ -47,6 +47,25 @@ FRED_SERIES = {
     "WALCL": "fed_balance_sheet",       # Fed total assets
     "RRPONTSYD": "reverse_repo",        # overnight reverse repo
     "WTREGEN": "treasury_general_acct", # Treasury General Account
+    # Pulse composite inputs (pulse.jsx):
+    "BAMLH0A0HYM2": "hy_oas",           # ICE BofA US High Yield OAS (%)
+    "VIXCLS": "vix",                    # CBOE VIX close
+    "DEXJPUS": "jpy_usd",               # JPY per USD (carry-unwind watch)
+}
+
+# ---- Global M2 (Raoul Pal lens) components -------------------------------
+# Sum of the 5 major money-supply blocs, each converted to USD. China's M2 has no
+# maintained FRED series (MYAGM2CNM189N ended 2017) — we use the OECD broad-money
+# (M3) series for the others, monthly, and scale by FX. Honest proxy, ~85% of the
+# usual "global M2" aggregate; the front-end cares about the IMPULSE (6-mo change),
+# which this captures.
+GLOBAL_M2_PARTS = {
+    # series id            (key,     ccy,   fx series id, fx orientation)
+    "M2SL":              ("us",   "USD", None,       None),      # US M2, $B
+    "MABMM301EZM189S":   ("ez",   "EUR", "DEXUSEU", "mult"),    # euro area broad money, €
+    "MABMM301JPM189S":   ("jp",   "JPY", "DEXJPUS", "div"),     # Japan, ¥
+    "MABMM301GBM189S":   ("uk",   "GBP", "DEXUSUK", "mult"),    # UK, £
+    "MABMM301CAM189S":   ("ca",   "CAD", "DEXCAUS", "div"),     # Canada, C$
 }
 
 # crypto: coingecko id -> friendly symbol
@@ -356,6 +375,46 @@ def fred_all():
         val = bs[d] - rr.get(d, 0) - tga.get(d, 0)
         net.append({"d": d, "v": round(val / 1000.0, 1)})  # millions → billions
     macro["net_liquidity"] = net[-260:]
+
+    # ---- Global M2 in USD (monthly; see GLOBAL_M2_PARTS note) ----
+    try:
+        parts, fx_cache = {}, {}
+        for sid, (key, ccy, fx_sid, orient) in GLOBAL_M2_PARTS.items():
+            s = fred_series(sid, limit=200)
+            time.sleep(0.3)
+            if not s:
+                continue
+            if fx_sid:
+                if fx_sid not in fx_cache:
+                    fx_cache[fx_sid] = fred_series(fx_sid, limit=4000)
+                    time.sleep(0.3)
+                fxs = fx_cache[fx_sid]
+                if not fxs:
+                    continue
+                fx_by_month = {}
+                for o in fxs:  # last daily obs per month
+                    fx_by_month[o["d"][:7]] = o["v"]
+                conv = []
+                for o in s:
+                    r = fx_by_month.get(o["d"][:7])
+                    if not r:
+                        continue
+                    v = o["v"] * r if orient == "mult" else o["v"] / r
+                    conv.append({"d": o["d"], "v": v})
+                s = conv
+            # OECD MABMM301 series are national-currency LEVELS (not billions) —
+            # normalize everything to $B like M2SL (which is already $B)
+            if sid != "M2SL" and s and s[-1]["v"] > 1e6:
+                s = [{"d": o["d"], "v": o["v"] / 1e9} for o in s]
+            parts[key] = {o["d"][:7]: o["v"] for o in s}
+        if "us" in parts and len(parts) >= 3:
+            months = sorted(set.intersection(*[set(p) for p in parts.values()]))
+            gm2 = [{"d": m + "-01", "v": round(sum(p[m] for p in parts.values()), 1)} for m in months]
+            macro["global_m2"] = gm2[-84:]  # ~7y monthly, values in $B
+            macro["global_m2_parts"] = sorted(parts.keys())
+    except Exception as e:
+        print("  global_m2 failed:", e)
+
     return macro
 
 
@@ -434,6 +493,15 @@ def finnhub_news(pairs, per=3):
 # Domain restriction to known financial/macro publishers + sourcelang filter
 # keeps signal high; currency terms (yen/BoJ/ECB/ISM etc.) added so FX-moving
 # stories (e.g. Japanese yen intervention) actually surface.
+# A second, supply-chain-scoped pass feeds the transmission graph's r2 chokepoints
+# (critical materials, uranium, Canada-US trade, pharma supply, executive orders) —
+# those headlines rarely match the macro terms above.
+GDELT_SUPPLY_TOPICS = [
+    '"rare earth"', "helium", "gallium", "germanium", "uranium",
+    '"export control"', '"executive order"', '"drug shortage"',
+    '"Panama Canal"', '"Red Sea"', '"Taiwan Strait"', '"Canada tariff"',
+    "USMCA", '"softwood lumber"', '"power grid"',
+]
 def gdelt(query=None, n=15):
     if query is None:
         topics = [
@@ -444,8 +512,7 @@ def gdelt(query=None, n=15):
         query = "(" + " OR ".join(topics) + ") sourcelang:eng"
     url = ("https://api.gdeltproject.org/api/v2/doc/doc?query="
            + urllib.parse.quote(query)
-           + f"&mode=ArtList&maxrecords={n}&format=json&sort=DateDesc")
-    j = get_json(url)
+           + f"&mode=ArtList&maxrecords={n}&format=json&sort=DateDesc")    j = get_json(url)
     out = []
     for a in (j or {}).get("articles", []):
         title = a.get("title") or ""
@@ -536,8 +603,9 @@ def main():
     # calls for names you don't own yet — lower value than the fundamentals that
     # actually drive scoring, so scope it to what you hold + geopolitical/macro).
     held_pairs_for_news = [(t, finnhub_fund_symbol(t)) for t in holdings_tickers]
+    gdelt_supply = gdelt("(" + " OR ".join(GDELT_SUPPLY_TOPICS) + ") sourcelang:eng", n=10)
     news = finnhub_news(held_pairs_for_news) + [
-        {**a, "ticker": "MACRO"} for a in gdelt()
+        {**a, "ticker": "MACRO"} for a in (gdelt() + gdelt_supply)
     ]
 
     meta = {"generatedAt": now_iso(),
