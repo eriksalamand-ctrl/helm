@@ -512,7 +512,8 @@ def gdelt(query=None, n=15):
         query = "(" + " OR ".join(topics) + ") sourcelang:eng"
     url = ("https://api.gdeltproject.org/api/v2/doc/doc?query="
            + urllib.parse.quote(query)
-           + f"&mode=ArtList&maxrecords={n}&format=json&sort=DateDesc")    j = get_json(url)
+           + f"&mode=ArtList&maxrecords={n}&format=json&sort=DateDesc")
+    j = get_json(url)
     out = []
     for a in (j or {}).get("articles", []):
         title = a.get("title") or ""
