@@ -98,8 +98,39 @@ function rdRecordMonth() {
 }
 
 function TrackedMonths({ accountId, accent }) {
-  const led = rdRecordMonth();
+  const [led, setLed] = React.useState(rdRecordMonth);
+  const [bf, setBf] = React.useState(false);
+  const [txt, setTxt] = React.useState("");
+  const [bfMsg, setBfMsg] = React.useState("");
   const key = accountId === "all" || accountId === "crypto" ? "all" : accountId;
+  // backfill parser: one month per line — accepts "2025-01 245000", "01/2025 245 000,50$", "janv 2025: $245,000"
+  const MONTHS_FR = { jan: 1, janv: 1, fev: 2, fév: 2, feb: 2, mar: 3, mars: 3, avr: 4, apr: 4, mai: 5, may: 5, juin: 6, jun: 6, juil: 7, jul: 7, aou: 8, aoû: 8, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12, déc: 12 };
+  function parseBackfill(t) {
+    const out = [], bad = [];
+    t.split(/\n+/).map((l) => l.trim()).filter(Boolean).forEach((l) => {
+      let ym = null;
+      let m = l.match(/(20\d{2})[-\/\.](\d{1,2})/); // 2025-01
+      if (m) ym = `${m[1]}-${String(+m[2]).padStart(2, "0")}`;
+      if (!ym) { m = l.match(/(\d{1,2})[-\/\.](20\d{2})/); if (m) ym = `${m[2]}-${String(+m[1]).padStart(2, "0")}`; } // 01/2025
+      if (!ym) { m = l.match(/([a-zéûà]{3,5})\.?\s+(20\d{2})/i); if (m) { const k = m[1].toLowerCase(); const mo = MONTHS_FR[k.slice(0, 4)] || MONTHS_FR[k.slice(0, 3)]; if (mo) ym = `${m[2]}-${String(mo).padStart(2, "0")}`; } } // Janv 2025 — case-insensitive on the ORIGINAL line so replace(m[0]) works
+      const rest = ym ? l.replace(m[0], "") : l;
+      const v = rest.replace(/[^0-9.,-]/g, "").replace(/\s/g, "");
+      // FR decimals: strip thousand separators, keep last , or . as decimal
+      const num = parseFloat(v.replace(/[,\.](?=\d{3}\b)/g, "").replace(",", "."));
+      if (ym && isFinite(num) && num > 0) out.push([ym, Math.round(num)]);
+      else bad.push(l);
+    });
+    return { out, bad };
+  }
+  function applyBackfill() {
+    const { out, bad } = parseBackfill(txt);
+    if (!out.length) { setBfMsg("No line parsed — format: 2025-01 245000 (one month per line)"); return; }
+    const L = rdLedger();
+    out.forEach(([ym, v]) => { const e = L[ym] || {}; e[key] = v; if (!e.asOf || e.src === "stmt") { e.asOf = ym; e.src = "stmt"; } L[ym] = e; });
+    try { localStorage.setItem(RD_LKEY, JSON.stringify(L)); } catch (e) {}
+    setLed(L); setTxt(""); setBf(false);
+    setBfMsg(`${out.length} month${out.length > 1 ? "s" : ""} backfilled for ${key === "all" ? "all accounts" : "this account"}${bad.length ? ` · ${bad.length} line${bad.length > 1 ? "s" : ""} skipped` : ""}`);
+  }
   const months = Object.keys(led).sort();
   const rows = months.map((ym, i) => {
     const close = led[ym][key];
@@ -111,7 +142,19 @@ function TrackedMonths({ accountId, accent }) {
       <div className="pm-card-head">
         <div className="pm-card-eyebrow">Monthly tracking · real snapshots{accountId === "crypto" ? " · all accounts" : ""}</div>
         <span style={{ fontSize: 11, color: "var(--muted)" }}>auto-recorded on each visit · month-end value = last visit that month</span>
+        <button onClick={() => { setBf(!bf); setBfMsg(""); }} style={{ font: "inherit", fontSize: 11.5, fontWeight: 600, color: bf ? "var(--accent, #2563eb)" : "var(--muted)", background: "none", border: "1px solid var(--line, #e2e5e9)", borderRadius: 7, padding: "3px 9px", cursor: "pointer", marginLeft: "auto", flex: "none" }}>{bf ? "✕ close" : "+ backfill"}</button>
       </div>
+      {bf && (
+        <div style={{ margin: "4px 0 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "var(--ink-2, #444)" }}>Paste month-end closing values from your statements — one month per line, for <strong>{key === "all" ? "all accounts combined" : "the selected account"}</strong>. Formats accepted: <span className="mono" style={{ fontSize: 11 }}>2025-01 245000</span> · <span className="mono" style={{ fontSize: 11 }}>01/2025 245 000,50 $</span> · <span className="mono" style={{ fontSize: 11 }}>janv 2025: $245,000</span></div>
+          <textarea value={txt} onChange={(e) => setTxt(e.target.value)} rows={6} placeholder={"2025-01 245000\n2025-02 251300\n2025-03 248900"} style={{ font: "12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace", padding: "8px 10px", border: "1px solid var(--line, #e2e5e9)", borderRadius: 8, resize: "vertical", background: "var(--panel, #f8f9fb)", color: "inherit" }}></textarea>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button onClick={applyBackfill} style={{ font: "inherit", fontSize: 12, fontWeight: 700, color: "#fff", background: accent || "var(--accent, #2563eb)", border: "none", borderRadius: 7, padding: "6px 14px", cursor: "pointer" }}>Backfill</button>
+            <span style={{ fontSize: 11.5, color: "var(--muted)" }}>Overwrites only the pasted months · marked “statement” in the ledger</span>
+          </div>
+        </div>
+      )}
+      {bfMsg && <div style={{ fontSize: 12, fontWeight: 600, color: bfMsg.startsWith("No line") ? "#e02424" : "#0e9f6e", margin: "2px 0 10px" }}>{bfMsg}</div>}
       <div className="pm-table-wrap">
         <table className="pm-table">
           <thead><tr><th className="ta-left">Month</th><th className="ta-right">Closing value</th><th className="ta-right">Variation nette</th><th className="ta-right">Rendement</th><th className="ta-right">Snapshot</th></tr></thead>
@@ -122,13 +165,13 @@ function TrackedMonths({ accountId, accent }) {
                 <td className="ta-right mono">{fmtMoney0(r.close)}</td>
                 <td className="ta-right mono" style={{ color: r.delta == null ? "var(--muted)" : r.delta >= 0 ? "#0e9f6e" : "#e02424" }}>{r.delta == null ? "— baseline" : (r.delta >= 0 ? "+" : "−") + "$" + Math.abs(r.delta).toLocaleString("en-US")}</td>
                 <td className="ta-right mono" style={{ color: r.pct == null ? "var(--muted)" : r.pct >= 0 ? "#0e9f6e" : "#e02424" }}>{r.pct == null ? "—" : (r.pct >= 0 ? "+" : "") + r.pct.toFixed(2) + "%"}</td>
-                <td className="ta-right mono" style={{ color: "var(--muted)", fontSize: 11 }}>{r.asOf}</td>
+                <td className="ta-right mono" style={{ color: "var(--muted)", fontSize: 11 }}>{led[r.ym] && led[r.ym].src === "stmt" && r.asOf === r.ym ? "statement" : r.asOf}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <div className="rd-note" style={{ marginTop: 10 }}>This ledger tracks <strong>real</strong> month-over-month net variation and return from {months[0]} forward — it fills itself as months pass (uses live-feed values when connected). Paste your statement history in chat to backfill earlier months as real data.</div>
+      <div className="rd-note" style={{ marginTop: 10 }}>This ledger tracks <strong>real</strong> month-over-month net variation and return from {months[0]} forward — it fills itself as months pass (uses live-feed values when connected). Use <strong>+ backfill</strong> to add earlier months from your statements.</div>
     </section>
   );
 }
