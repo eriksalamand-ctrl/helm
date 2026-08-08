@@ -1,0 +1,68 @@
+Helm dist manifest — 2026-08-08
+Each line: <path> <bytes>. After uploading to GitHub, sizes must match exactly.
+A mismatch means the upload swapped file contents.
+
+Helm Autonomy Roadmap.html                    40592
+Learning Lab Analysis.html                    31335
+Model Comparison - TPS-QCIO.html              27932
+NBC Research Documentation.html               14246
+Portfolio Manager.html                        65694
+analysis.jsx                                  7957
+app.jsx                                       45599
+backtest.jsx                                  11611
+bridge.jsx                                    37436
+charts.jsx                                    10859
+chief.jsx                                     22267
+ciomix.jsx                                    16182
+cioview.jsx                                   19277
+cockpit.jsx                                   18512
+compound.jsx                                  16466
+cryptoview.jsx                                11087
+data.jsx                                      31200
+engineconfig.js                               3860
+etf-universe.js                               50327
+feed-config.js                                1323
+feed.jsx                                      3013
+feed/DEPLOY-STEP-BY-STEP.md                   4962
+feed/README.md                                1708
+feed/ingest.py                                29170
+feed/positions.csv                            867
+feed/quotes-worker.js                         3591
+feed/transcript-worker.js                     10007
+feed/wrangler.toml                            583
+intake.jsx                                    29996
+ips.jsx                                       13089
+learning.jsx                                  23213
+learninglab.jsx                               58108
+ledger.jsx                                    6833
+macro.jsx                                     20295
+methods.jsx                                   9656
+nbc-research.js                               6034
+nightloop.jsx                                 18070
+odds.jsx                                      9193
+oecdata.jsx                                   12366
+pages.jsx                                     12376
+papersim.jsx                                  82079
+plan.jsx                                      34685
+projections.jsx                               11740
+pulse.jsx                                     10812
+readiness.jsx                                 4833
+realtrades.js                                 7079
+reference/data-architecture.md                7426
+reference/frameworks.md                       4843
+reflexion.jsx                                 27023
+regime.jsx                                    26247
+rendement.jsx                                 21709
+risk.jsx                                      5548
+roundtable.jsx                                4791
+screener.jsx                                  31688
+sigma.jsx                                     10207
+spine.jsx                                     10099
+strategy.jsx                                  52227
+tracker.jsx                                   30800
+tradehistory.jsx                              4085
+tradeui.jsx                                   11918
+transmission-graph.js                         11637
+transmission.jsx                              16840
+tweaks-panel.jsx                              23964
+txmap.jsx                                     12978

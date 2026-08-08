@@ -1,262 +1,271 @@
-// chief.jsx — v2-B/A: Rhodes' fact pack, material-news filter, evidence-chain proposition
-// cards with round-table stances, and the brief composer. Deterministic facts; the LLM
-// (window.helmAI ?? window.claude) may rephrase the brief but NEVER computes a number —
-// rule-based composition is the floor and the fallback.
-(function () {
-  const D = () => window.PMData;
-  const money = (n) => "$" + Math.abs(n) .toLocaleString("en-US", { maximumFractionDigits: 0 });
+// cockpit.jsx — "Today": the Chief's morning brief. Leaner v2: the Chief's synthesis and the
+// day's proposed trades/readjustments get the space; macro & finance news sit beside them;
+// governance folds into a compact policy strip. Mode-aware (Minimal → risk/exits only).
+const { useState: useCkState } = React;
 
-  const MACRO_KEYWORDS = /rate|fed|inflation|cpi|tariff|sanction|oil|opec|liquidity|treasur|yield|bank of canada|boc|ecb|boj|yen|dollar|recession|gdp|jobs|payroll/i;
+const ckUP = "#0e9f6e", ckDN = "#e02424", ckWARN = "#d97706";
+const ckMoney = (n) => "$" + (Math.abs(n) >= 1000 ? n.toLocaleString("en-US", { maximumFractionDigits: 0 }) : n.toFixed(2));
+const ckSign = (n, dp = 1) => (n >= 0 ? "+" : "−") + Math.abs(n).toFixed(dp);
 
-  function cfgFor() {
-    const st = window.computeHelmState ? window.computeHelmState() : null;
-    const preset = st ? st.p.riskProfile.toLowerCase() : "balanced";
-    const cfg = (window.helmPresetCfg || (() => ({ buyBar: 62, sellBar: 40, maxPos: 12, stopMult: 1 })))(preset);
-    return { st, preset, cfg };
+function ckCfg(risk) {
+  return (window.helmPresetCfg || (() => ({ weights: { trend: 35, value: 20, reversion: 25, income: 20 }, buyBar: 62, sellBar: 40, rsiOver: 72, rsiUnder: 30, stopMult: 1, maxPos: 12 })))(risk);
+}
+
+// ---- macro & finance news (live via feed, honest demo fallback) ----
+const CK_MOCK_NEWS = [
+  { headline: "Strait of Hormuz tensions keep a risk premium in crude", source: "Reuters", tone: -2.1, tag: "Geopolitics" },
+  { headline: "Fed chair Warsh signals patience on rate cuts amid sticky core CPI", source: "Bloomberg", tone: -0.8, tag: "Monetary" },
+  { headline: "AI capex cycle broadens beyond mega-cap; concentration risk debated", source: "FT", tone: 0.6, tag: "Equities" },
+  { headline: "Gold extends gains as central banks keep accumulating reserves", source: "WGC", tone: 1.1, tag: "Commodities" },
+  { headline: "Canadian dollar firms on stronger commodity terms of trade", source: "BoC", tone: 0.5, tag: "FX" },
+];
+function ckNews() {
+  const live = window.HelmFeed && window.HelmFeed.news;
+  if (live && live.length) {
+    return live.filter((n) => n.headline).slice(0, 6).map((n) => ({
+      headline: n.headline, source: n.source || "—", tone: n.tone || 0, url: n.url,
+      tag: n.ticker && n.ticker !== "MACRO" ? n.ticker : "Macro",
+    }));
   }
+  return CK_MOCK_NEWS;
+}
 
-  // ---- universe scope: held (aggregated by ticker) + screener universe, deduped ----
-  function scope() {
-    const byT = {};
-    (D().allHoldings || []).forEach((h) => {
-      if (!byT[h.ticker]) byT[h.ticker] = { ...h, held: true, mv: 0, cost: 0 };
-      const q = h.qty || h.q || 0;
-      byT[h.ticker].mv += (h.marketValue || h.price * q);
-      byT[h.ticker].cost += (h.costBasis || (h.avg || h.price) * q);
-    });
-    (window.HelmUniverse || []).forEach((u) => { if (!byT[u.ticker]) byT[u.ticker] = { ...u, held: false }; });
-    return Object.values(byT);
-  }
+function Cockpit({ accent, onNav, onPick }) {
+  const D = window.PMData;
+  const [, force] = useCkState(0);
+  React.useEffect(() => {
+    const h = () => force((n) => n + 1);
+    window.addEventListener("helm:feed", h); window.addEventListener("helm:regime", h); window.addEventListener("helm:drift", h);
+    return () => { window.removeEventListener("helm:feed", h); window.removeEventListener("helm:regime", h); window.removeEventListener("helm:drift", h); };
+  }, []);
 
-  function acctName(id) { const a = D().accounts.find((x) => x.id === id); return a ? a.name : id; }
+  const mode = window.HelmMode || "Standard";
+  const minimal = mode === "Minimal";
+  const st = window.computeHelmState ? window.computeHelmState() : null;
+  let regime = window.HelmRegime;
+  if (!regime && window.classifyRegime) { const r = window.classifyRegime(); regime = { label: r.label, bias: r.bias, key: r.key, geoScore: 0 }; window.HelmRegime = regime; }
+  const drift = window.HelmDrift;
+  const view = D.buildView("all");
+  const K = view.kpis;
+  const cfg = ckCfg(st ? st.p.riskProfile.toLowerCase() : "balanced");
 
-  // account routing per the house convention (registered → no direct coins; ccy match).
-  // Native listing ccy comes from HelmSigma.nativeCcy (held account / universe market /
-  // ticker suffix) — allHoldings.ccy is the display currency and must not be used here.
-  function routeBuy(h, amt) {
-    const isCoin = /Crypto/i.test(h.sector || "") && !/ETF|\.B$|\.TO$/.test(h.ticker) && !(h.name || "").includes("ETF");
-    const nat = window.HelmSigma ? window.HelmSigma.nativeCcy(h.ticker) : (/\.TO$|\.B$|\.UN$/.test(h.ticker) ? "CAD" : "USD");
-    const usd = nat === "USD";
-    const elig = D().accounts.filter((a) => isCoin ? a.id === "crypto-direct" : a.ccy === (usd ? "USD" : "CAD") && a.id !== "crypto-direct");
-    const best = elig.sort((a, b) => (b.cash || 0) - (a.cash || 0))[0];
-    if (!best) return null;
-    return { acct: best.id, acctName: best.name, amt: Math.min(amt, best.cash || 0) };
-  }
+  // ---- aggregate holdings by ticker for sell/trim scan ----
+  const byT = {};
+  D.allHoldings.forEach((h) => {
+    if (!byT[h.ticker]) byT[h.ticker] = { ticker: h.ticker, name: h.name, sector: h.sector, price: h.price, spark: h.spark, divYield: h.divYield || 0, mv: 0, cost: 0, held: true };
+    const q = h.qty || h.q || 0; byT[h.ticker].mv += (h.marketValue || h.price * q); byT[h.ticker].cost += (h.costBasis || (h.avg || h.price) * q);
+  });
+  const holds = Object.values(byT).map((h) => { h.plPct = h.cost ? ((h.mv - h.cost) / h.cost) * 100 : 0; h.weight = K.equity ? (h.mv / K.equity) * 100 : 0; return h; });
 
-  // ---- v2-A: build the day's cards (0–3 buys + up to 2 readjustments), gated ----
-  function buildCards() {
-    const { st, preset, cfg } = cfgFor();
-    const S = window.HelmSigma;
-    const view = D().buildView("all");
-    const equity = view.kpis.equity || 1;
-    const slice = equity * (preset === "aggressive" ? 0.05 : preset === "conservative" ? 0.025 : 0.035);
-    const all = scope();
-    const sig = (h) => { try { return window.signalsFor ? window.signalsFor(h, cfg) : null; } catch (e) { return null; } };
+  // ---- score: exits/trims from holdings (risk-first), buys from universe ----
+  const sig = (h) => window.signalsFor ? window.signalsFor(h, cfg) : null;
+  const dur = (s) => window.helmDurationOf ? window.helmDurationOf(s) : { k: "Weeks" };
 
-    // --- buy candidates through the gate chain ---
-    const gateLog = [];
-    let cands = all.map((h) => ({ h, s: sig(h) })).filter((x) => x.s && x.s.action === "Buy");
-    const floor = cfg.buyBar + 6;
-    cands = cands.filter((x) => {
-      if (x.s.composite < floor) return false; // G4 conviction floor w/ margin
-      if (!x.s.realFund && !x.h.held) { gateLog.push({ t: x.h.ticker, g: "G1 real-data" }); return false; }
-      return true;
-    });
-    cands.forEach((x) => { x.e = S ? S.entryRead(x.h.ticker) : null; });
-    cands = cands.filter((x) => {
-      if (x.e && x.e.gate === "block-chase") { gateLog.push({ t: x.h.ticker, g: "G3 σ>+2 no-chase" }); return false; }
-      if (x.e && x.e.gate === "block-knife") { gateLog.push({ t: x.h.ticker, g: "G3 σ<−2 knife" }); return false; }
-      return true;
-    });
-    // G6 crypto-stance gate: the cycle clock gates ALL crypto-sector buys (coins AND ETF
-    // wrappers — signalsFor's own gate misses wrappers). WAIT → only a long-term BTC nibble;
-    // DCA → BTC/ETH majors only; DISTRIBUTE → no crypto buys at all.
-    let cycle = null;
-    try { cycle = window.HelmCryptoCycle ? window.HelmCryptoCycle() : null; } catch (e) {}
-    const cycStance = cycle ? (typeof cycle.stance === "object" ? cycle.stance.stance : cycle.stance) : null;
-    cands = cands.filter((x) => {
-      if (!/Crypto/i.test(x.h.sector || "")) return true;
-      const t = x.h.ticker;
-      if (cycStance === "WAIT" || cycStance === "DISTRIBUTE") { gateLog.push({ t, g: `G6 crypto ${cycStance}` }); return false; }
-      if (cycStance === "DCA" && !/^BTC|^ETH/i.test(t)) { gateLog.push({ t, g: "G6 DCA majors-only" }); return false; }
-      return true;
-    });
-    // vol-adjusted edge (A-6): move-to-target ÷ path σ (√-scaled), rank desc
-    cands.forEach((x) => {
-      const up = (x.s.target - x.h.price) / x.h.price;
-      const volH = (x.e ? x.e.sigmaD : 0.02) * Math.sqrt(63);
-      x.edge = up / Math.max(0.02, volH);
-    });
-    cands.sort((a, b) => b.edge - a.edge);
-    const buys = cands.slice(0, 3);
+  const exits = holds.map((h) => ({ h, s: sig(h) })).filter((x) => x.s && x.s.action === "Sell")
+    .sort((a, b) => a.s.composite - b.s.composite)
+    .map((x) => ({ kind: x.s.sellKind === "Exit" ? "Exit" : "Trim", ...x }));
 
-    // --- readjustments from the held book ---
-    const sells = all.filter((h) => h.held).map((h) => ({ h, s: sig(h) }))
-      .filter((x) => x.s && x.s.action === "Sell")
-      .sort((a, b) => a.s.composite - b.s.composite);
-    const adj = sells.slice(0, 2);
+  const universe = (window.HelmUniverse || holds);
+  const buys = universe.map((h) => ({ h, s: sig(h) })).filter((x) => x.s && x.s.action === "Buy")
+    .sort((a, b) => b.s.composite - a.s.composite).slice(0, 5)
+    .map((x) => ({ kind: "Buy", ...x }));
 
-    // always classify FRESH — window.HelmRegime may hold a stale pre-feed read
-    let regime = null;
-    if (window.HelmRegimeCompute) { try { const r = window.HelmRegimeCompute(); regime = { label: r.label, bias: r.bias, key: r.key, since: r.since, pending: r.pending }; window.HelmRegime = regime; } catch (e) {} }
-    if (!regime) regime = window.HelmRegime || {};
-    const news = getNews();
+  let moves = [...exits.slice(0, 2), ...buys];
+  if (minimal) moves = exits;
+  moves = moves.slice(0, minimal ? 6 : 4);
 
-    const mkCard = (x, kind) => {
-      const { h, s, e } = x;
-      const route = kind === "Buy" ? routeBuy(h, slice) : null;
-      const shares = route && h.price ? Math.floor(route.amt / h.price) : 0;
-      const newsHit = news.items.find((n) => n.tickers.includes(h.ticker));
-      // evidence chain — each row carries provenance
-      const ev = [];
-      if (e) ev.push({ cls: "mod", tag: `σ vs ${e.benchName}`, txt: `${e.z >= 0 ? "+" : ""}${e.z.toFixed(1)}σ now${Math.abs(e.zPrev - e.z) > 0.6 ? ` (was ${e.zPrev >= 0 ? "+" : ""}${e.zPrev.toFixed(1)}σ 6wk ago)` : ""} · RS rank ${e.rs ? e.rs.pct + "th pct" : "—"}${e.setup ? " · " + e.setup.replace(/-/g, " ") : ""}${e.real ? "" : " · demo series"}` });
-      ev.push({ cls: s.realFund ? "real" : "mod", tag: s.realFund ? "feed · real" : "proxy", txt: `quality ${s.qualityScore} · value ${s.valueScore} · trend ${s.trendScore}${s.realFund ? " — real fundamentals" : " — proxy scores (held name)"}` });
-      ev.push({ cls: "mod", tag: "regime", txt: `${regime.label || "—"} · ${regime.bias || "—"}${cycStance && /Crypto/i.test(h.sector || "") ? " · crypto stance " + cycStance : ""}` });
-      if (newsHit) ev.push({ cls: "news", tag: "news", txt: newsHit.headline.slice(0, 110) });
-      // Vera's intake ledger: tracked outside-source claims on this name, credibility-weighted
-      const intake = (() => {
-        try {
-          if (!window.HelmIntake) return null;
-          const J = window.HelmIntake.load();
-          const cl = J.claims.filter((c) => c.ticker === h.ticker).map(window.HelmIntake.scoreClaim);
-          if (!cl.length) return null;
-          const cred = window.HelmIntake.credibility(J);
-          const open = cl.filter((c) => c.status === "open");
-          const bull = open.filter((c) => c.direction === "bullish").length;
-          const scores = [...new Set(cl.map((c) => c.src))].map((s2) => cred[s2] && cred[s2].score).filter((v) => v != null);
-          return { n: cl.length, open: open.length, bull, bear: open.length - bull, best: scores.length ? Math.max(...scores) : null };
-        } catch (e) { return null; }
-      })();
-      if (intake) ev.push({ cls: "news", tag: "Vera intake", txt: `${intake.n} tracked claim${intake.n > 1 ? "s" : ""} · ${intake.bull}▲ ${intake.bear}▼ open${intake.best != null ? ` · best source ${intake.best}% hit` : " · sources unproven yet"}` });
-      const kill = kind === "Buy"
-        ? `Closes below ${money(s.stop)} (stop) or RS rank drops out of top quartile — exit without debate.`
-        : `Recovery above ${money(s.target)} with trend repair would void this ${kind.toLowerCase()}.`;
-      // round-table stances (deterministic reads, persona-labeled)
-      const stances = {
-        vera: (() => {
-          let base = s.realFund ? (s.qualityScore >= 55 ? ["BUY", "quality real & sound"] : ["CAUTION", "quality " + s.qualityScore]) : ["WATCH", "proxy data"];
-          if (intake && intake.open) base = [base[0], base[1] + ` · intake ${intake.bull > intake.bear ? "bullish" : intake.bear > intake.bull ? "bearish" : "split"} (${intake.open})`];
-          return base;
-        })(),
-        flint: e && e.setup ? ["BUY", e.setup.replace(/-/g, " ")] : e && e.gate !== "pass" ? ["NO SHOT", e.gate] : kind !== "Buy" ? [kind.toUpperCase(), "risk mgmt"] : ["HOLD FIRE", "no setup"],
-        iris: /Risk-on|Constructive/.test(regime.bias || "") ? ["SUPPORTIVE", "regime tailwind"] : /Risk-off|Defensive/.test(regime.bias || "") ? ["SMALLER", "defensive regime"] : ["NEUTRAL", "mixed tape"],
-      };
-      let gates = { ok: true, notes: [] };
-      try {
-        if (window.HelmIPS && window.HelmIPS.checkTrade && kind === "Buy" && route) {
-          const r = window.HelmIPS.checkTrade({ ticker: h.ticker, sec: h.sector, ccy: h.ccy, acct: route.acct, amount: route.amt, side: "buy" });
-          if (r) gates = { ok: !(r.blocked || (r.hard || []).length), notes: (r.hard || r.breaches || r.soft || []).map((b) => b.msg || b.rule || b) };
-        }
-      } catch (err) {}
-      // dissent = a voice pushing against THIS card's action. Iris's regime-wide caution is
-      // real dissent on a Buy (defensive tape, buy anyway → size smaller). On trims/exits the
-      // current stances have no "keep it" voice, so no dissent line — avoids badge noise.
-      const dissent = kind === "Buy" && Object.values(stances).some((v) => /CAUTION|SMALLER|WATCH|NO SHOT/.test(v[0]));
-      // weighted round-table vote (Borda + credibility): ballots weighted by measured track records
-      let vote = null;
-      try { vote = window.HelmRoundTable ? window.HelmRoundTable.vote(stances, kind, { regime: (regime && (regime.key || regime.label)) || "", sector: h.sector || "" }) : null; } catch (err) {}
-      return { kind, ticker: h.ticker, name: h.name, held: !!h.held, sig: s, e, edge: x.edge,
-        thesis: kind === "Buy"
-          ? (e && e.setup === "leader-pullback" ? `Leader vs ${e.benchName} pulling back to its index path — the entry this engine is calibrated to buy.` : e && e.leader ? `Top-quartile leader inside the band vs ${e.benchName}.` : `Clears the ${preset} bar by ${(s.composite - cfg.buyBar).toFixed(0)} pts with acceptable risk shape.`)
-          : kind === "Exit" ? `Trend broken and score deteriorating — capital is better deployed elsewhere.` : `Extended after the run — bank a third, keep the position working.`,
-        ev, kill, stances, gates, route, shares, dissent, vote };
-    };
+  // ---- policy breaches ----
+  const breaches = [];
+  if (st && st.volOver > 0.5) breaches.push({ t: "Volatile budget", d: `${st.volPct.toFixed(0)}% vs ${st.p.specCap}% budget — ${st.volOver.toFixed(0)} pts over`, lvl: st.f.status === "Ahead" ? "high" : "warn", go: "Plan" });
+  if (drift && drift.score != null && drift.score >= 60) breaches.push({ t: "Model drift", d: `${drift.label} · confidence ${drift.conf}`, lvl: "high", go: "Learning" });
+  if (regime && /Risk-off|Defensive/.test(regime.bias)) breaches.push({ t: "Defensive regime", d: `${regime.label} — model favours de-risking`, lvl: "warn", go: "Macro" });
+  if (st && st.f.status === "Behind") breaches.push({ t: "Funded behind", d: `Funded ratio ${(st.f.ratio * 100).toFixed(0)}% — return pressure high`, lvl: "warn", go: "Plan" });
 
-    return {
-      cards: [...buys.map((x) => mkCard(x, "Buy")), ...adj.map((x) => mkCard(x, x.s.sellKind === "Exit" ? "Exit" : "Trim"))],
-      gateLog, floor, preset, flagged: sells.length, scanned: all.length,
-    };
-  }
+  // ---- the Chief's synthesized brief ----
+  const stanceWord = regime ? (/Risk-on|Constructive/.test(regime.bias) ? "lean into risk" : /Risk-off|Defensive/.test(regime.bias) ? "stay defensive" : "hold a balanced stance") : "hold a balanced stance";
+  const nBuys = moves.filter((m) => m.kind === "Buy").length;
+  const nAdj = moves.length - nBuys;
+  const adjPhrase = nAdj ? `${nAdj} readjustment${nAdj === 1 ? "" : "s"}${exits.length > nAdj ? ` (top of ${exits.length} flagged)` : ""}` : "no readjustments";
+  const lead = regime
+    ? `Recommendation: ${stanceWord}${st && st.volOver > 0.5 ? ` and bring the volatile sleeve back within budget (${st.volOver.toFixed(0)} pts over)` : regime && /Risk-on|Constructive/.test(regime.bias) ? " and put cash to work in the top-conviction names below" : /Risk-off|Defensive/.test(regime.bias) ? " — trim risk and hold quality" : " and rebalance toward target weights"}. ${minimal ? "Minimal mode — risk actions only." : moves.length ? `${nBuys} buy idea${nBuys === 1 ? "" : "s"} and ${adjPhrase} are proposed below.` : "No high-conviction moves today — sit tight; a no-trade day is a valid call."}`
+    : "Classifying the regime — open Macro → Economic CIO to initialise the engine.";
+  const doLine = breaches.length
+    ? `Do: ${breaches[0].t.toLowerCase()} first (${breaches[0].d.split("—")[0].trim()}), then review the proposed moves. Nothing else needs you today.`
+    : moves.length ? `Do: review the ${moves.length} proposed move${moves.length === 1 ? "" : "s"} below — then close the app.` : "Do: nothing. You're within policy and no setup clears the bar.";
 
-  // ---- material-news filter ----
-  const DEMO_NEWS = [
-    { headline: "Hyperscaler capex guidance raised — AI supply chain supportive", source: "demo", tickers: ["NVDA", "TSM", "AMD"], macro: false },
-    { headline: "BoC speaker leans dovish; CAD softer on the week", source: "demo", tickers: [], macro: true },
-    { headline: "Strait of Hormuz insurance rates tick up — crude risk premium holds", source: "demo", tickers: ["CNQ", "SU"], macro: true },
-  ];
-  function getNews() {
-    const heldSet = {};
-    (D().allHoldings || []).forEach((h) => { heldSet[h.ticker] = true; });
-    const raw = (window.HelmFeed && window.HelmFeed.news && window.HelmFeed.news.length)
-      ? window.HelmFeed.news.map((n) => ({ headline: n.headline, source: n.source || "feed", url: n.url,
-          tickers: n.ticker && n.ticker !== "MACRO" ? [n.ticker] : [], macro: !n.ticker || n.ticker === "MACRO" }))
-      : DEMO_NEWS;
-    const total = raw.length;
-    const items = raw.filter((n) => n.headline && (n.tickers.some((t) => heldSet[t]) || (n.macro && MACRO_KEYWORDS.test(n.headline)))).slice(0, 4)
-      .map((n) => ({ ...n, touch: n.tickers.filter((t) => heldSet[t]), action: n.tickers.some((t) => heldSet[t]) ? "review holding" : "no action — within regime read" }));
-    return { items, total, live: !!(window.HelmFeed && window.HelmFeed.status && window.HelmFeed.status.live) };
-  }
+  const chips = [
+    regime && { k: "Regime", v: `${regime.label} · ${regime.bias}`, go: "Macro" },
+    st && { k: "Funded", v: `${st.f.status} ${(st.f.ratio * 100).toFixed(0)}%`, go: "Plan" },
+    st && { k: "Vol budget", v: `${st.volPct.toFixed(0)}% of ${st.p.specCap}%`, warn: st.volOver > 0.5, go: "Plan" },
+    drift && { k: "Drift", v: drift.label, warn: drift.score >= 60, go: "Learning" },
+  ].filter(Boolean);
 
-  // ---- the fact pack + rule-based brief (every sentence carries a src chip) ----
-  function factPack() {
-    const { st } = cfgFor();
-    const view = D().buildView("all");
-    const K = view.kpis;
-    let regime = null;
-    if (window.HelmRegimeCompute) {
-      try { const r = window.HelmRegimeCompute(); regime = { label: r.label, bias: r.bias, key: r.key, since: r.since, pending: r.pending }; window.HelmRegime = regime; } catch (e) {}
-    }
-    if (!regime) regime = window.HelmRegime || null;
-    const drift = window.HelmDrift || null;
-    const props = buildCards();
-    const news = getNews();
-    const breaches = [];
-    if (st && st.volOver > 0.5) breaches.push({ t: "Volatile sleeve", d: `${st.volPct.toFixed(0)}% vs ${st.p.specCap}% budget (+${st.volOver.toFixed(0)} pts)`, go: "Plan" });
-    if (drift && drift.score >= 60) breaches.push({ t: "Model drift", d: drift.label, go: "Learning" });
-    if (st && st.f.status === "Behind") breaches.push({ t: "Funded behind", d: `ratio ${(st.f.ratio * 100).toFixed(0)}%`, go: "Plan" });
-    // top drag/lift today
-    const agg = {};
-    view.holdings.forEach((h) => { const k = h.ticker; agg[k] = (agg[k] || 0) + (h.dispValue || 0) * ((h.dayPct || 0) / 100); });
-    const movers = Object.entries(agg).sort((a, b) => a[1] - b[1]);
-    const drag = movers[0], lift = movers[movers.length - 1];
-    return { K, regime, st, props, news, breaches, drag, lift };
-  }
+  const news = ckNews();
+  const feedLive = !!(window.HelmFeed && window.HelmFeed.status && window.HelmFeed.status.live);
 
-  function composeBrief(fp) {
-    const { K, regime, props, news, breaches, drag, lift } = fp;
-    const S = [];
-    if (regime) S.push({ txt: `${/Risk-on|Constructive/.test(regime.bias) ? "Constructive tape" : /Risk-off|Defensive/.test(regime.bias) ? "Defensive tape" : "Mixed tape"} — regime ${regime.label} · ${regime.bias}.`, src: "REGIME" });
-    const dayTxt = `Book ${K.dayChangePct >= 0 ? "up" : "down"} ${Math.abs(K.dayChangePct).toFixed(1)}% today${drag && drag[1] < -50 ? `, dragged by ${drag[0]} (−${money(drag[1])})` : lift && lift[1] > 50 ? `, led by ${lift[0]} (+${money(lift[1])})` : ""}.`;
-    S.push({ txt: dayTxt, src: "P&L" });
-    breaches.forEach((b) => S.push({ txt: `${b.t}: ${b.d}.`, src: "IPS" }));
-    const nBuys = fp.props.cards.filter((c) => c.kind === "Buy").length;
-    const nAdj = fp.props.cards.length - nBuys;
-    S.push({ txt: props.cards.length === 0
-      ? `No proposition clears the bar (floor ${props.floor}, margin +6) — a no-trade day, held with intent.`
-      : `${nBuys ? nBuys + " buy" + (nBuys > 1 ? "s" : "") : "No buys"}${nAdj ? ` and ${nAdj} readjustment${nAdj > 1 ? "s" : ""}` : ""} clear${props.cards.length === 1 ? "s" : ""} the gates${props.gateLog.length ? ` (${props.gateLog.length} candidate${props.gateLog.length > 1 ? "s" : ""} blocked at G1/G3)` : ""}.`, src: "ENGINE" });
-    S.push({ txt: news.items.length ? `${news.items.length} of ${news.total} news items are material to the book.` : `Nothing in the tape is material to holdings today.`, src: "NEWS" });
-    const doLine = breaches.length
-      ? `Do: fix ${breaches[0].t.toLowerCase()} first${props.cards.length ? ", then take the cards below" : ""} — then log off.`
-      : props.cards.length ? `Do: work the ${props.cards.length} card${props.cards.length > 1 ? "s" : ""} below — then log off.` : `Do: nothing. Close the app; the crew keeps watch.`;
-    return { sentences: S, doLine };
-  }
+  const moveColor = (k) => k === "Buy" ? ckUP : k === "Exit" ? ckDN : ckWARN;
+  const NavLink = ({ to, children }) => <button className="ck-link" onClick={() => onNav && onNav(to)}>{children}</button>;
 
-  // optional LLM polish — cached one per day; falls back silently.
-  // Returns body prose ONLY — the UI renders the Do-line itself in the green box.
-  async function polishBrief(fp, brief) {
-    const ai = window.helmAI || (window.claude && window.claude.complete ? window.claude : null);
-    if (!ai) return null;
-    const key = "helm_chief_brief_v3"; // v3: v2 cache had markdown headers + duplicated Do-line
-    const facts = brief.sentences.map((s) => `[${s.src}] ${s.txt}`).join("\n");
-    let fh = 0; for (let i = 0; i < facts.length; i++) { fh = (fh * 31 + facts.charCodeAt(i)) | 0; }
-    try {
-      const c = JSON.parse(localStorage.getItem(key) || "null");
-      // regenerate when the facts materially change (e.g. live feed landing after mount)
-      if (c && c.day === new Date().toISOString().slice(0, 10) && c.fh === fh) return c.text;
-    } catch (e) {}
-    try {
-      const prompt = `You are Rhodes, a terse ex-military first mate. Rewrite the facts below as ONE plain-text paragraph (<=80 words) in a PM's voice.\nHARD RULES: plain prose only — no markdown, no asterisks, no headers, no bullet lists, no line breaks. Every fact must appear, including the regime line. These are PROPOSALS awaiting the captain's decision — NEVER say executed, traded, filled, done, or booked. Do NOT write a Do/action line — the app renders that separately. No new numbers, names, or claims.\nFACTS:\n${facts}\nReturn the paragraph only.`;
-      const res = await (ai.complete ? ai.complete(prompt) : ai(prompt));
-      let text = typeof res === "string" ? res.trim() : null;
-      if (text) {
-        text = text.replace(/[*#_`]+/g, "").replace(/\s*\n+\s*/g, " ").trim(); // markdown/linebreak guard
-        const doIdx = text.search(/\bDo:/i); if (doIdx > 20) text = text.slice(0, doIdx).trim(); // Do-line guard
-      }
-      if (text && /execut|traded|filled|booked/i.test(text)) text = null; // hallucination guard
-      if (text && text.length > 40) { localStorage.setItem(key, JSON.stringify({ day: new Date().toISOString().slice(0, 10), fh, text })); return text; }
-    } catch (e) {}
-    return null;
-  }
+  return (
+    <div className="ck">
+      <style>{COCKPIT_CSS}</style>
 
-  window.HelmChief = { factPack, buildCards, getNews, composeBrief, polishBrief };
-})();
+      {/* ============ the Chief's brief — the hero ============ */}
+      <section className="pm-card ck-brief">
+        <div className="ck-brief-top">
+          <div className="ck-cio">
+            <div className="ck-cio-badge" style={{ background: accent }}>CIO</div>
+            <div>
+              <div className="ck-eyebrow">The Chief · morning brief</div>
+              <div className="ck-date">{new Date().toLocaleDateString("en-CA", { weekday: "long", month: "long", day: "numeric" })}{minimal ? " · Minimal mode" : ""}</div>
+            </div>
+          </div>
+          <div className="ck-nl">
+            <div className="ck-nl-k">Net liquidity</div>
+            <div className="ck-nl-v mono">{ckMoney(K.equity)}</div>
+            <div className="ck-nl-d mono" style={{ color: K.dayChangeAbs >= 0 ? ckUP : ckDN }}>{ckSign(K.dayChangePct)}% today</div>
+          </div>
+        </div>
+        <p className="ck-lead">{lead}</p>
+        <p className="ck-do">{doLine}</p>
+        <div className="ck-chips">
+          {chips.map((c) => (
+            <button className={`ck-chip${c.warn ? " warn" : ""}`} key={c.k} onClick={() => onNav && onNav(c.go)}>
+              <span>{c.k}</span><strong>{c.v}</strong>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <div className="ck-grid">
+        {/* ============ proposed trades & readjustments ============ */}
+        <section className="pm-card ck-moves">
+          <div className="pm-card-head">
+            <div className="pm-card-eyebrow">{minimal ? "Risk actions" : "Proposed trades & readjustments"}</div>
+            <NavLink to="Screener">Open Screener →</NavLink>
+          </div>
+          {moves.length === 0 ? (
+            <div className="ck-empty"><strong>No proposition today.</strong> No new buy clears the {st ? st.p.riskProfile : "current"} bar and no position needs trimming or reallocation — you're within policy. A no-trade day is a valid, disciplined call.</div>
+          ) : (<React.Fragment>{moves.every((m) => m.kind !== "Buy") ? <div className="ck-move-note">No new <strong>buys</strong> clear the bar today — the moves below are <strong>risk-management trims/exits</strong> to keep the book on target.</div> : null}{moves.map(({ kind, h, s }) => {
+            const d = dur(s);
+            const rr = (s.target - h.price) / Math.max(0.0001, h.price - s.stop);
+            const why = kind === "Buy" ? `Score ${s.composite}, ${s.mom >= 55 ? "trend confirmed" : "setup forming"}${regime && /Risk-on|Constructive/.test(regime.bias) ? ", regime supportive" : ""}`
+              : kind === "Exit" ? `Score ${s.composite} weak / trend broken — exit` : `Overbought ${s.rsi.toFixed(0)} — trim into strength`;
+            return (
+              <div className="ck-move" key={kind + h.ticker} onClick={() => onPick && onPick(h.ticker)}>
+                <div className="ck-move-act" style={{ color: moveColor(kind), background: moveColor(kind) + "16" }}>{kind}</div>
+                <div className="ck-move-main">
+                  <div className="ck-move-tkr">{h.ticker} <span className="ck-move-name">{h.name}</span></div>
+                  <div className="ck-move-why">{why}</div>
+                </div>
+                <div className="ck-move-nums">
+                  <div className="ck-move-tp"><span style={{ color: ckDN }}>SL {ckMoney(s.stop)}</span> · <span style={{ color: ckUP }}>TP {ckMoney(s.target)}</span></div>
+                  <div className="ck-move-meta"><span className="ck-move-dur">{d.k}</span> · R:R {rr > 0 ? rr.toFixed(1) : "—"}</div>
+                </div>
+              </div>
+            );
+          })}</React.Fragment>)}
+          <div className="ck-foot">Rule-based engine at your {st ? st.p.riskProfile : "current"} preset — click a row for full research, or <NavLink to="Strategy Lab">open Strategy Lab →</NavLink>. Not advice.</div>
+        </section>
+
+        {/* ============ right rail: news + policy ============ */}
+        <div className="ck-rail">
+          <section className="pm-card ck-news">
+            <div className="pm-card-head">
+              <div className="pm-card-eyebrow">Macro & finance news {feedLive ? "· live" : "· demo"}</div>
+              <NavLink to="Macro">Macro →</NavLink>
+            </div>
+            {news.map((n, i) => {
+              const tc = n.tone > 0.5 ? ckUP : n.tone < -0.5 ? ckDN : "var(--muted)";
+              return (
+                <div className="ck-news-row" key={i}>
+                  <div className="ck-news-top">
+                    <span className="ck-news-tag">{n.tag}</span>
+                    <span className="ck-news-tone" style={{ color: tc }}>{n.tone > 0.5 ? "▲" : n.tone < -0.5 ? "▼" : "—"}</span>
+                  </div>
+                  <div className="ck-news-h">{n.url ? <a href={n.url} target="_blank" rel="noopener">{n.headline}</a> : n.headline}</div>
+                  <div className="ck-news-src">{n.source}</div>
+                </div>
+              );
+            })}
+            {!feedLive && <div className="ck-foot">Demo headlines — connect the feed for live GDELT + Finnhub events.</div>}
+          </section>
+
+          <section className="pm-card ck-watch">
+            <div className="pm-card-eyebrow">Policy watch</div>
+            {breaches.length === 0 ? (
+              <div className="ck-clear"><div className="ck-clear-ico" style={{ background: ckUP }}>✓</div><div><strong>Within policy.</strong><span>No breaches across budget, drift, regime or funded status.</span></div></div>
+            ) : breaches.map((b) => (
+              <div className={`ck-breach ${b.lvl}`} key={b.t}>
+                <div className="ck-breach-top"><strong>{b.t}</strong><button className="ck-link" onClick={() => onNav && onNav(b.go)}>{b.go} →</button></div>
+                <div className="ck-breach-d">{b.d}</div>
+              </div>
+            ))}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const COCKPIT_CSS = `
+.ck { display: flex; flex-direction: column; gap: 14px; }
+.ck-link { font: inherit; font-size: 12px; font-weight: 600; color: var(--accent, #0e9f6e); background: none; border: 0; cursor: pointer; padding: 0; }
+.ck-link:hover { text-decoration: underline; }
+.ck-brief { padding: 22px 24px; }
+.ck-brief-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+.ck-cio { display: flex; gap: 12px; align-items: center; }
+.ck-cio-badge { width: 44px; height: 44px; border-radius: 12px; color: #fff; font-weight: 800; font-size: 13px; display: grid; place-items: center; letter-spacing: 0.02em; }
+.ck-eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.ck-date { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; margin-top: 2px; }
+.ck-nl { text-align: right; }
+.ck-nl-k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.ck-nl-v { font-size: 21px; font-weight: 700; }
+.ck-nl-d { font-size: 12px; font-weight: 600; }
+.ck-lead { font-size: 16px; line-height: 1.65; color: var(--ink); margin-top: 16px; max-width: 940px; text-wrap: pretty; }
+.ck-do { font-size: 13.5px; line-height: 1.55; color: var(--ink); margin-top: 10px; max-width: 940px; padding: 10px 14px; background: color-mix(in srgb, var(--accent, #0e9f6e) 6%, transparent); border: 1px solid color-mix(in srgb, var(--accent, #0e9f6e) 20%, var(--line)); border-radius: 9px; }
+.ck-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.ck-chip { display: inline-flex; align-items: baseline; gap: 7px; font: inherit; font-size: 11.5px; color: var(--muted); background: var(--panel-2, #f8f9fb); border: 1px solid var(--line); border-radius: 99px; padding: 5px 12px; cursor: pointer; }
+.ck-chip strong { color: var(--ink); font-weight: 600; }
+.ck-chip.warn { border-color: #d9770655; } .ck-chip.warn strong { color: #b45309; }
+.ck-chip:hover { border-color: var(--muted); }
+.ck-grid { display: grid; grid-template-columns: 1.45fr 1fr; gap: 14px; align-items: start; }
+.ck-rail { display: flex; flex-direction: column; gap: 14px; }
+.ck-move { display: flex; align-items: center; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--line-2); cursor: pointer; }
+.ck-move:hover { background: var(--panel-2); }
+.ck-move:last-of-type { border-bottom: 0; }
+.ck-move-act { font-size: 12px; font-weight: 700; padding: 4px 11px; border-radius: 7px; flex: none; width: 52px; text-align: center; }
+.ck-move-main { flex: 1; }
+.ck-move-tkr { font-size: 14.5px; font-weight: 700; }
+.ck-move-name { font-weight: 400; color: var(--muted); font-size: 12px; }
+.ck-move-why { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+.ck-move-nums { text-align: right; flex: none; }
+.ck-move-tp { font-size: 11.5px; font-family: var(--mono); }
+.ck-move-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.ck-move-dur { font-weight: 600; color: var(--ink-2); }
+.ck-empty, .ck-clear span { color: var(--muted); font-size: 13px; }
+.ck-empty { line-height: 1.55; } .ck-empty strong { color: var(--ink); }
+.ck-move-note { font-size: 12px; color: var(--ink-2); line-height: 1.5; padding: 8px 12px; margin-bottom: 10px; background: color-mix(in srgb, var(--accent, #0e9f6e) 6%, white); border: 1px solid color-mix(in srgb, var(--accent, #0e9f6e) 18%, var(--line)); border-radius: 8px; }
+.ck-move-note strong { color: var(--ink); }
+.ck-news-row { padding: 9px 0; border-bottom: 1px solid var(--line-2); }
+.ck-news-row:last-of-type { border-bottom: 0; }
+.ck-news-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 2px; }
+.ck-news-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent, #0e9f6e); }
+.ck-news-tone { font-size: 10px; }
+.ck-news-h { font-size: 12.5px; line-height: 1.45; color: var(--ink); }
+.ck-news-h a { color: inherit; text-decoration: none; }
+.ck-news-h a:hover { text-decoration: underline; }
+.ck-news-src { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+.ck-clear { display: flex; gap: 12px; align-items: center; padding: 6px 0; }
+.ck-clear-ico { width: 28px; height: 28px; border-radius: 8px; color: #fff; display: grid; place-items: center; font-size: 14px; flex: none; }
+.ck-clear strong { display: block; font-size: 13.5px; } .ck-clear span { display: block; font-size: 12px; }
+.ck-breach { border-left: 3px solid; padding: 8px 0 8px 13px; margin-bottom: 8px; }
+.ck-breach.high { border-color: #e02424; } .ck-breach.warn { border-color: #d97706; }
+.ck-breach-top { display: flex; justify-content: space-between; align-items: baseline; }
+.ck-breach-top strong { font-size: 13px; }
+.ck-breach-d { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+.ck-foot { font-size: 11.5px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
+@media (max-width: 920px) { .ck-grid { grid-template-columns: 1fr; } }
+`;
+
+window.Cockpit = Cockpit;

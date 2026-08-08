@@ -1,229 +1,224 @@
-// ciomix.jsx — Chief Investment Office top-down asset mix across accounts.
-// Proposes a target balance between US growth, Canada defensive, Crypto sleeve (+ cash/ballast)
-// driven by regime, macro (rates/liquidity/USD proxy) and the chosen portfolio type. Sets
-// window.HelmCIOMix(preset) → { targets:{us,ca,crypto,cash}, drivers, note }. Honest heuristic.
-(function () {
-  // real medium-term US-vs-Canada relative strength from feed index history (SPX vs TSX).
-  // Returns a signed lean: >0 = US leading, <0 = Canada leading, null if no data.
-  function usCaRS() {
-    const P = window.HelmFeed && window.HelmFeed.prices;
-    if (!P || !P.SPX || !P.TSX) return null;
-    const ret = (series, days) => {
-      if (!series || series.length < days + 1) return null;
-      const a = series[series.length - 1].c, b = series[series.length - 1 - days].c;
-      return b ? (a - b) / b * 100 : null;
-    };
-    // blend 3-month (63d) and 6-month (126d) relative return
-    const parts = [];
-    [[63, 0.5], [126, 0.5]].forEach(([d, w]) => {
-      const us = ret(P.SPX, d), ca = ret(P.TSX, d);
-      if (us != null && ca != null) parts.push([(us - ca), w]);
+// compound.jsx — the "Compounding Machine" (GMI pattern, reference/vision/gmi-compounding-machine):
+// a long-horizon discipline tool for one compounding asset (default BTC). Fits a log-trend
+// channel (HelmSigma.logTrend), then simulates the mechanical rules over history:
+//   BUY a fixed $ when the price is ≥ buyσ below trend (once per zone entry, weekly checks)
+//   CHIP (sell a fixed %) when ≥ chipσ above trend — "lifestyle chips"
+// with honest accounting + counterfactuals. Simulation on the SAME series the app shows;
+// demo series flagged. Settings persist. No orders — pair with "Log trade" when acting.
+const { useState: useCmState, useMemo: useCmMemo } = React;
+
+function CompoundingMachine({ accent }) {
+  const UP = "#0e9f6e", DN = "#e02424", WARN = "#d97706";
+  const money = (n) => "$" + Math.round(Math.abs(n)).toLocaleString("en-US");
+  const KEY = "helm_compound_v1";
+  const saved = (() => { try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { return {}; } })();
+  const [ticker, setTicker] = useCmState(saved.ticker || "BTC");
+  const [buyAmt, setBuyAmt] = useCmState(saved.buyAmt || 2000);
+  const [buySig, setBuySig] = useCmState(saved.buySig != null ? saved.buySig : 1);   // buy at ≤ −buySig
+  const [chipSig, setChipSig] = useCmState(saved.chipSig != null ? saved.chipSig : 1); // chip at ≥ +chipSig
+  const [chipPct, setChipPct] = useCmState(saved.chipPct != null ? saved.chipPct : 20);
+  const [vsKey, setVsKey] = useCmState(saved.vsKey || "own");
+  const save = (patch) => { try { localStorage.setItem(KEY, JSON.stringify({ ticker, buyAmt, buySig, chipSig, chipPct, vsKey, ...patch })); } catch (e) {} };
+
+  const D = window.PMData;
+  const options = useCmMemo(() => {
+    const seen = {}; const out = [];
+    (D.allHoldings || []).forEach((h) => { if (!seen[h.ticker]) { seen[h.ticker] = 1; out.push(h.ticker); } });
+    (window.HelmUniverse || []).forEach((u) => { if (!seen[u.ticker]) { seen[u.ticker] = 1; out.push(u.ticker); } });
+    return out.sort();
+  }, []);
+
+  const lt = useCmMemo(() => window.HelmSigma ? window.HelmSigma.logTrend(ticker, 1260, vsKey === "own" ? null : vsKey) : null, [ticker, vsKey]);
+  const rel = !!(lt && lt.vsName); // ratio-channel mode actually active
+
+  const sim = useCmMemo(() => {
+    if (!lt) return null;
+    const { zPath, n } = lt;
+    const px = lt.px || lt.arr; // asset price for $ accounting (arr = ratio in rel mode)
+    let units = 0, invested = 0, chipCash = 0, unitsNoChip = 0;
+    const buys = [], chips = [];
+    let inBuy = false, inChip = false;
+    for (let i = 0; i < n; i += 5) { // weekly checks, as the reference does
+      const z = zPath[i], p = px[i];
+      if (z <= -buySig) {
+        if (!inBuy) { const u = buyAmt / p; units += u; unitsNoChip += u; invested += buyAmt; buys.push({ i, px: p, z }); inBuy = true; }
+      } else inBuy = false;
+      if (z >= chipSig) {
+        if (!inChip && units > 0) { const sold = units * (chipPct / 100); chipCash += sold * p; units -= sold; chips.push({ i, px: p, z, $: sold * p }); inChip = true; }
+      } else inChip = false;
+    }
+    const pxNow = px[n - 1];
+    const valueNow = units * pxNow;
+    return { buys, chips, invested, chipCash, valueNow, pxNow,
+      outOfPocket: invested - chipCash,
+      totalNow: valueNow + chipCash,
+      noChipValue: unitsNoChip * pxNow,
+      pl: valueNow + chipCash - invested };
+  }, [lt, buyAmt, buySig, chipSig, chipPct]);
+
+  // ---- channel chart: log series + trend ± σ lines (straight in log space) + date axis ----
+  const chart = useCmMemo(() => {
+    if (!lt) return null;
+    const { arr, slope, intercept, sd, n } = lt;
+    const W = 720, H = 228, P = 6, PB = 22;
+    const ln = arr.map(Math.log);
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < n; i++) {
+      lo = Math.min(lo, ln[i], intercept + slope * i - 2.2 * sd);
+      hi = Math.max(hi, ln[i], intercept + slope * i + 2.2 * sd);
+    }
+    const x = (i) => P + (i / (n - 1)) * (W - 2 * P);
+    const y = (v) => H - PB - ((v - lo) / (hi - lo)) * (H - P - PB);
+    const path = ln.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    const trend = (k) => `M${x(0)},${y(intercept + k * sd)} L${x(n - 1)},${y(intercept + slope * (n - 1) + k * sd)}`;
+    // timeline: trading-day index → calendar date (×≈51.45), ~5 ticks
+    const dateAt = (i) => new Date(Date.now() - (n - 1 - i) * 1.4484 * 86400000);
+    const ticks = [0.02, 0.26, 0.5, 0.74, 0.98].map((f) => {
+      const i = Math.round(f * (n - 1)); const d = dateAt(i);
+      return { i, label: d.toLocaleDateString("en-US", { month: "short" }) + " '" + String(d.getFullYear()).slice(2) };
     });
-    if (!parts.length) return null;
-    const wsum = parts.reduce((s, p) => s + p[1], 0);
-    return parts.reduce((s, p) => s + p[0] * p[1], 0) / wsum; // pp of US-minus-CA relative return
-  }
+    return { W, H, PB, x, y, ln, path, trend, ticks };
+  }, [lt]);
 
-  function usdProxy() {
-    // no free DXY — proxy USD strength from real rates + risk regime (higher rates + risk-off = stronger USD)
-    const m = window.HelmFeed && window.HelmFeed.macro;
-    const r = window.HelmRegime;
-    let s = 50;
-    if (m && m.us10y && m.us10y.length) { const y = m.us10y[m.us10y.length - 1].v; s += (y - 4) * 6; }
-    if (m && m.fed_funds && m.fed_funds.length) { const f = m.fed_funds[m.fed_funds.length - 1].v; s += (f - 3) * 4; }
-    if (r) { if (/Risk-off|Defensive/.test(r.bias)) s += 10; else if (/Risk-on/.test(r.bias)) s -= 10; }
-    return Math.max(0, Math.min(100, Math.round(s)));
-  }
+  if (!lt) return <section className="pm-card">No usable history for {ticker}.</section>;
+  const zoneCol = lt.zone === "buy" ? UP : lt.zone === "chip" ? WARN : "var(--ink-2)";
+  const yrs = (lt.n / 252).toFixed(1);
+  const Num = ({ label, v, col, sub }) => (
+    <div className="cm-kpi"><div className="cm-kpi-l">{label}</div><div className="cm-kpi-v mono" style={col ? { color: col } : null}>{v}</div>{sub && <div className="cm-kpi-s">{sub}</div>}</div>
+  );
 
-  // base sleeve splits per portfolio type (sum to 100, before regime tilt)
-  const BASE = {
-    conservative: { us: 28, ca: 45, crypto: 4, cash: 23 },
-    balanced:     { us: 38, ca: 36, crypto: 14, cash: 12 },
-    aggressive:   { us: 46, ca: 18, crypto: 28, cash: 8 },
-  };
-  // crypto is the strategic FIRE/volatile sleeve — regime modulates it within a band [floor, cap],
-  // it is never fully deleted (the user runs it as a deliberate asymmetric-offense allocation).
-  const CRYPTO_FLOOR = { conservative: 2, balanced: 7, aggressive: 14 };
-  const CRYPTO_CAP   = { conservative: 6, balanced: 18, aggressive: 34 };
+  return (
+    <div className="cm-wrap">
+      <style>{CM_CSS}</style>
+      <section className="pm-card">
+        <div className="cm-head">
+          <div>
+            <div className="pm-card-eyebrow">Compounding Machine · log-trend channel discipline</div>
+            <div className="cm-title">{ticker} vs {rel ? <b>{lt.vsName} · ratio channel</b> : "its own trend"} <span className="cm-flag mono">{lt.real ? "● live series" : "demo series"} · {yrs}y fit</span></div>
+          </div>
+          <div className="cm-signal" style={{ borderColor: zoneCol + "55", background: zoneCol + "0d" }}>
+            <div className="cm-sig-z mono" style={{ color: zoneCol }}>{lt.z >= 0 ? "+" : ""}{lt.z.toFixed(1)}σ</div>
+            <div className="cm-sig-t" style={{ color: zoneCol }}>{lt.zone === "buy" ? "BUY ZONE" : lt.zone === "chip" ? "CHIP ZONE" : "IN CHANNEL"}</div>
+            <div className="cm-sig-s">{rel ? `${((lt.arr[lt.n - 1] / lt.fairNow - 1) * 100).toFixed(0)}% vs rel. trend · price ${money(lt.px[lt.n - 1])}` : `price ${money(lt.arr[lt.n - 1])} vs fair ${money(lt.fairNow)} (${((lt.arr[lt.n - 1] / lt.fairNow - 1) * 100).toFixed(0)}%)`}</div>
+          </div>
+        </div>
 
-  // crypto cycle read: 4-year halving clock + net-liquidity (Raoul/Global-M2) overlay → phase +
-  // an expected forward annual-return band. Heuristic, NOT a prediction — the Chief's honest prior.
-  function cryptoCycle() {
-    const halving = new Date("2024-04-19").getTime();
-    const mo = Math.max(0, Math.round((Date.now() - halving) / (1000 * 60 * 60 * 24 * 30.4)));
-    const c = mo % 48;
-    let phase, lo, hi;
-    if (c < 12)      { phase = "Accumulation";     lo = 25;  hi = 60; }
-    else if (c < 18) { phase = "Markup";           lo = 40;  hi = 90; }
-    else if (c < 24) { phase = "Euphoria";         lo = -10; hi = 25; }
-    else if (c < 34) { phase = "Markdown";         lo = -40; hi = 0;  }
-    else             { phase = "Re-accumulation";  lo = 20;  hi = 55; }
-    const m = window.HelmFeed && window.HelmFeed.macro;
-    let liq = 0;
-    if (m && m.net_liquidity && m.net_liquidity.length > 60) {
-      const a = m.net_liquidity[m.net_liquidity.length - 1].v, b = m.net_liquidity[m.net_liquidity.length - 61].v;
-      liq = b ? (a - b) / Math.abs(b) : 0;
-    }
-    const adj = Math.round(liq * 120);
-    const liqRising = liq > 0.02, liqDraining = liq < -0.02;
-    const eff = (phase === "Markdown" && liqRising) ? "Re-accumulation" : phase;
-    return { phase, eff, months: c, lo: lo + adj, hi: hi + adj, liqRising, liqDraining };
-  }
+        {chart && (
+          <svg viewBox={`0 0 ${chart.W} ${chart.H}`} style={{ width: "100%", height: "auto", display: "block", marginTop: 10 }}>
+            {chart.ticks.map((t, i) => (
+              <g key={"t" + i}>
+                <line x1={chart.x(t.i)} x2={chart.x(t.i)} y1={4} y2={chart.H - chart.PB} stroke="var(--line-2, #f0f2f5)" strokeWidth="1"></line>
+                <text x={chart.x(t.i)} y={chart.H - 6} textAnchor="middle" fontSize="9.5" fill="var(--muted)" fontFamily="var(--mono)">{t.label}</text>
+              </g>
+            ))}
+            {[2, 1].map((k) => <path key={"u" + k} d={chart.trend(k)} stroke={WARN} strokeOpacity={k === 1 ? 0.5 : 0.25} strokeWidth="1" strokeDasharray="4 4" fill="none"></path>)}
+            <path d={chart.trend(0)} stroke="var(--muted)" strokeWidth="1.2" fill="none"></path>
+            {[1, 2].map((k) => <path key={"d" + k} d={chart.trend(-k)} stroke={UP} strokeOpacity={k === 1 ? 0.5 : 0.25} strokeWidth="1" strokeDasharray="4 4" fill="none"></path>)}
+            <path d={chart.path} stroke="#121820" strokeWidth="1.5" fill="none"></path>
+            {sim.buys.map((b, i) => <circle key={"b" + i} cx={chart.x(b.i)} cy={chart.y(chart.ln[b.i])} r="4" fill={UP}></circle>)}
+            {sim.chips.map((c, i) => <circle key={"c" + i} cx={chart.x(c.i)} cy={chart.y(chart.ln[c.i])} r="4" fill={WARN}></circle>)}
+          </svg>
+        )}
+        <div className="cm-legend"><span><i style={{ background: UP }}></i>buy (≤ −{buySig}σ)</span><span><i style={{ background: WARN }}></i>chip {chipPct}% (≥ +{chipSig}σ)</span><span>{rel ? `rel. trend ${lt.cagr >= 0 ? "+" : ""}${(lt.cagr * 100).toFixed(0)}%/yr vs ${lt.vsName}` : `trend ${(lt.cagr * 100).toFixed(0)}%/yr`} · 1σ = {(lt.sigmaPct * 100).toFixed(0)}%</span></div>
+        {rel && <div className="cm-note" style={{ marginTop: 7 }}>Ratio channel: the line is {ticker} ÷ {lt.vsName}. −σ = cheap <em>relative to {lt.vsName}</em> (not necessarily cheap outright); buys/chips below still transact the asset at its own price.</div>}
+        {lt.n < 630 && <div className="cm-shortfit">⚠ Short fit window ({yrs}y of history) — this channel is tactical, not the long-term compounding trend the tool is designed for. Read signals with skepticism until the feed accrues more history.</div>}
 
-  // crypto DEPLOYMENT STANCE — the Chief's call on whether to deploy capital into crypto NOW:
-  // WAIT (don't deploy) · DCA (scale in slowly) · DEPLOY (toward target) · DISTRIBUTE (take profit).
-  function cryptoStance(cycle, biasStr) {
-    const ph = cycle.eff, defensive = /Risk-off|Defensive/.test(biasStr);
-    if (ph === "Euphoria")
-      return { stance: "DISTRIBUTE", pace: "Trim into strength", reason: "Late-cycle euphoria — take profit and rotate toward BTC or cash. No new adds.", trigger: "Re-enter on the next Accumulation phase." };
-    if (ph === "Markdown") {
-      if (cycle.liqRising)
-        return { stance: "DCA", pace: "Scale in · ~15%/mo of target", reason: "Markdown, but liquidity is turning up — the bottoming tell. Begin a BTC-first DCA.", trigger: "Step up to DEPLOY once price reclaims the range (trend confirms)." };
-      return { stance: "WAIT", pace: defensive ? "Hold cash · prep a BTC-first DCA" : "Hold · wait for the liquidity turn",
-        reason: defensive ? "Bottoming but not confirmed; liquidity still draining and the book is defensive — don't deploy the sleeve yet. A small long-horizon BTC DCA is optional." : "Markdown with draining liquidity — wait for the liquidity turn before deploying.",
-        trigger: "Start the DCA the moment net liquidity turns positive (watch Macro)." };
-    }
-    if (ph === "Accumulation" || ph === "Re-accumulation")
-      return { stance: "DEPLOY", pace: "Scale toward target · ~25%/mo", reason: "Post-bottom base-building — deploy the BTC core first, add ETH/SOL as the cycle confirms.", trigger: "Full sleeve by Markup; trim only if Euphoria arrives." };
-    return { stance: "DEPLOY", pace: "Hold at target on majors", reason: "Markup underway — keep the sleeve at target on the majors; let a small satellite run.", trigger: "Begin trimming as Euphoria signals appear." };
-  }
+        <div className="cm-controls">
+          <label>Asset
+            <input list="cm-tickers" value={ticker} onChange={(e) => { const v = e.target.value.toUpperCase().trim(); setTicker(v); save({ ticker: v }); }} />
+            <datalist id="cm-tickers">{options.map((t) => <option key={t} value={t}></option>)}</datalist>
+          </label>
+          <label>Channel vs
+            <select value={vsKey} onChange={(e) => { const v = e.target.value; setVsKey(v); save({ vsKey: v }); }}>
+              <option value="own">Own trend (absolute)</option>
+              <option value="ndx">Nasdaq-100 (ratio)</option>
+              <option value="spx">S&P 500 (ratio)</option>
+              <option value="tsx">TSX 60 (ratio)</option>
+              <option value="btc">Bitcoin (ratio)</option>
+            </select>
+          </label>
+          <label>Buy $ per signal
+            <input type="number" min="100" step="100" value={buyAmt} onChange={(e) => { const v = +e.target.value || 0; setBuyAmt(v); save({ buyAmt: v }); }} />
+          </label>
+          <label>Buy at ≤ <b className="mono">−{buySig}σ</b>
+            <input type="range" min="0.5" max="2" step="0.25" value={buySig} onChange={(e) => { const v = +e.target.value; setBuySig(v); save({ buySig: v }); }} />
+          </label>
+          <label>Chip at ≥ <b className="mono">+{chipSig}σ</b>
+            <input type="range" min="0.5" max="2" step="0.25" value={chipSig} onChange={(e) => { const v = +e.target.value; setChipSig(v); save({ chipSig: v }); }} />
+          </label>
+          <label>Chip size <b className="mono">{chipPct}%</b>
+            <input type="range" min="5" max="50" step="5" value={chipPct} onChange={(e) => { const v = +e.target.value; setChipPct(v); save({ chipPct: v }); }} />
+          </label>
+        </div>
+      </section>
 
-  // standalone read for the buy engine (strategy.jsx) — preset-independent
-  window.HelmCryptoCycle = function () {
-    const c = cryptoCycle();
-    return Object.assign({}, c, { stance: cryptoStance(c, window.HelmRegime ? window.HelmRegime.bias : "Neutral") });
-  };
+      <section className="pm-card">
+        <div className="pm-card-eyebrow">If you had run these rules over the last {yrs} years — honest accounting</div>
+        <div className="cm-kpis">
+          <Num label="Signals" v={`${sim.buys.length} buys · ${sim.chips.length} chips`} />
+          <Num label="Total invested" v={money(sim.invested)} />
+          <Num label="Cash from chips" v={money(sim.chipCash)} col={WARN} />
+          <Num label="Out of pocket" v={money(sim.outOfPocket)} sub="invested − chips" />
+          <Num label="Stack value now" v={money(sim.valueNow)} />
+          <Num label="Total (stack + cash)" v={money(sim.totalNow)} col={sim.pl >= 0 ? UP : DN} sub={(sim.pl >= 0 ? "+" : "−") + money(sim.pl) + " vs invested"} />
+          <Num label="Never-chip counterfactual" v={money(sim.noChipValue)} sub={sim.noChipValue > sim.totalNow ? "holding all would have made " + money(sim.noChipValue - sim.totalNow) + " more" : "chipping beat holding by " + money(sim.totalNow - sim.noChipValue)} />
+        </div>
+        <div className="cm-note">Backtest on the fitted channel (hindsight bias: the trend uses today's fit). It measures the <em>discipline</em>, not a prediction. Signals check weekly; one buy per zone entry.{lt.real ? "" : " Demo series — goes real when the feed covers " + ticker + "."}</div>
+        {(sim.buys.length > 0 || sim.chips.length > 0) && (
+          <table className="cm-table">
+            <thead><tr><th>Signal</th><th>When</th><th>Price</th><th>σ</th><th className="r">Amount</th></tr></thead>
+            <tbody>
+              {[...sim.buys.map((b) => ({ ...b, k: "Buy" })), ...sim.chips.map((c) => ({ ...c, k: "Chip" }))].sort((a, b) => a.i - b.i).map((s, i) => (
+                <tr key={i}>
+                  <td style={{ color: s.k === "Buy" ? UP : WARN, fontWeight: 700 }}>{s.k}</td>
+                  <td>{Math.round((lt.n - s.i) / 252 * 12)} mo ago</td>
+                  <td className="mono">{money(s.px)}</td>
+                  <td className="mono">{s.z >= 0 ? "+" : ""}{s.z.toFixed(1)}σ</td>
+                  <td className="r mono">{s.k === "Buy" ? money(buyAmt) : money(s.$)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div className="cm-act">
+          {lt.zone === "buy" && <span style={{ color: UP, fontWeight: 700 }}>Signal live now:</span>}
+          {lt.zone === "chip" && <span style={{ color: WARN, fontWeight: 700 }}>Chip signal live now:</span>}
+          {window.TradeButton && lt.zone !== "neutral" && <window.TradeButton label={lt.zone === "buy" ? "Log a " + money(buyAmt) + " buy" : "Log a chip"} ticker={ticker} side={lt.zone === "buy" ? "buy" : "sell"} amount={lt.zone === "buy" ? buyAmt : undefined} source="CompoundingMachine" small />}
+          {lt.zone === "neutral" && <span className="cm-note" style={{ margin: 0 }}>No signal — in channel. The machine waits.</span>}
+        </div>
+      </section>
+    </div>
+  );
+}
 
-  window.HelmCIOMix = function (preset) {
-    const base = { ...(BASE[preset] || BASE.balanced) };
-    const r = window.HelmRegime;
-    const bias = r ? r.bias : "Neutral";
-    const usd = usdProxy();
-    const drivers = [];
+const CM_CSS = `
+.cm-wrap { display: flex; flex-direction: column; gap: 12px; }
+.cm-head { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.cm-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; margin-top: 2px; }
+.cm-flag { font-size: 10px; color: var(--muted); font-weight: 600; margin-left: 8px; }
+.cm-signal { border: 1.5px solid; border-radius: 12px; padding: 8px 16px 10px; text-align: center; min-width: 210px; max-width: 100%; box-sizing: border-box; }
+.cm-sig-z { font-size: 22px; font-weight: 700; }
+.cm-sig-t { font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; }
+.cm-sig-s { font-size: 10.5px; color: var(--muted); margin-top: 3px; font-family: var(--mono); line-height: 1.45; white-space: normal; }
+.cm-legend { display: flex; gap: 18px; font-size: 11px; color: var(--ink-2); margin-top: 7px; flex-wrap: wrap; }
+.cm-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.cm-shortfit { font-size: 11.5px; color: #b45309; background: #d9770610; border: 1px solid #d9770633; border-radius: 9px; padding: 8px 12px; margin-top: 9px; line-height: 1.5; }
+.cm-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-2, #f0f2f5); }
+.cm-controls label { font-size: 11px; color: var(--muted); font-weight: 600; display: flex; flex-direction: column; gap: 5px; }
+.cm-controls input[type=number], .cm-controls input[list], .cm-controls select { font: inherit; font-size: 13px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; width: 100%; box-sizing: border-box; background: #fff; }
+.cm-controls input[type=range] { width: 100%; accent-color: #121820; }
+.cm-controls b { color: var(--ink); }
+.cm-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 10px; }
+.cm-kpi { background: var(--panel-2, #f8f9fb); border: 1px solid var(--line-2, #f0f2f5); border-radius: 10px; padding: 9px 12px; }
+.cm-kpi-l { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 700; }
+.cm-kpi-v { font-size: 15px; font-weight: 700; margin-top: 3px; }
+.cm-kpi-s { font-size: 10px; color: var(--muted); margin-top: 2px; }
+.cm-note { font-size: 11.5px; color: var(--muted); line-height: 1.55; margin-top: 10px; }
+.cm-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
+.cm-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding: 5px 8px; border-bottom: 1px solid var(--line); }
+.cm-table td { padding: 6px 8px; border-bottom: 1px solid var(--line-2, #f0f2f5); }
+.cm-table .r { text-align: right; }
+.cm-act { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+`;
 
-    // regime tilt: risk-on → +US growth +crypto, −cash ; risk-off → +Canada defensive +cash, −crypto/US
-    let dU = 0, dCa = 0, dCr = 0, dCash = 0;
-    if (/Risk-on/.test(bias)) { dU += 8; dCr += 5; dCash -= 8; dCa -= 5; drivers.push("Risk-on regime → lean into US growth + crypto sleeve"); }
-    else if (/Constructive/.test(bias)) { dU += 4; dCr += 2; dCash -= 4; drivers.push("Constructive regime → modest risk-on tilt"); }
-    else if (/Defensive/.test(bias)) { dCa += 7; dCash += 5; dCr -= 5; dU -= 5; drivers.push("Defensive regime → rotate to Canada defensives + cash, trim crypto"); }
-    else if (/Risk-off/.test(bias)) { dCa += 10; dCash += 8; dCr -= 10; dU -= 8; drivers.push("Risk-off regime → maximize Canada defensives + cash, cut volatile sleeve"); }
-
-    // USD strength: strong USD favors holding US (currency tailwind for CAD-based investor); weak USD → Canada/crypto
-    if (usd >= 60) { dU += 4; dCa -= 2; drivers.push("Strong USD (proxy " + usd + ") → US assets carry an FX tailwind for a CAD investor"); }
-    else if (usd <= 40) { dCa += 4; dCr += 2; dU -= 4; drivers.push("Weak USD (proxy " + usd + ") → favor Canada + crypto over US"); }
-
-    // REAL US-vs-Canada relative strength (SPX vs TSX, 3-6mo) — the medium-term market lean
-    const rs = usCaRS();
-    if (rs != null) {
-      const tilt = Math.max(-10, Math.min(10, Math.round(rs * 0.8))); // ±10pp cap
-      dU += tilt; dCa -= tilt;
-      if (Math.abs(tilt) >= 2) drivers.push(`US ${rs >= 0 ? "leads" : "lags"} Canada by ${Math.abs(rs).toFixed(1)}pp over 3–6mo → lean ${rs >= 0 ? "US growth" : "Canada"} (real index RS)`);
-      else drivers.push("US and Canada are running neck-and-neck over 3–6mo → no market lean");
-    }
-
-    // liquidity: rising net liquidity supports the volatile sleeve (Raoul lens)
-    const m = window.HelmFeed && window.HelmFeed.macro;
-    if (m && m.net_liquidity && m.net_liquidity.length > 60) {
-      const a = m.net_liquidity[m.net_liquidity.length - 1].v, b = m.net_liquidity[m.net_liquidity.length - 61].v;
-      if (b && (a - b) / Math.abs(b) > 0.02) { dCr += 3; drivers.push("Net liquidity rising → supportive for the crypto sleeve"); }
-      else if (b && (a - b) / Math.abs(b) < -0.02) { dCr -= 3; dCash += 2; drivers.push("Net liquidity draining → de-risk the volatile sleeve"); }
-    }
-
-    // PLAN-AWARE glide: tie risk to the goal's required return and the time horizon.
-    // risk-NEED rises with the required return; risk-CAPACITY rises with years-to-goal and falls
-    // when already ahead of plan. The PRUDENT budget = min(need, capacity) — never need alone.
-    let planNote = null, planRisk = null;
-    const HP = window.HelmPlan;
-    if (HP && HP.loadPlan && HP.fundedCalc) {
-      try {
-        const p = HP.loadPlan();
-        const eq = (window.PMData && window.PMData.buildView) ? (window.PMData.buildView("all").kpis.equity || 0) : 0;
-        const f = HP.fundedCalc(p, eq);
-        const years = f.n || 0, req = f.requiredReturn;
-        if (req != null) {
-          const safe = 5.5, ceil = 15;                                   // CIO equity forecast → sane growth ceiling
-          const need = Math.max(0, Math.min(1, (req - safe) / (ceil - safe)));
-          let cap = Math.max(0, Math.min(1, years / 18));                // long horizon = more room to recover
-          if (f.ratio >= 1.1) cap *= 0.6;                                 // already ahead → dial risk down
-          const budget = Math.min(need, cap);                            // prudent risk = min(need, capacity)
-          const tilt = Math.round((budget - 0.5) * 10);                  // −5..+5 pp swing
-          dCr += Math.round(tilt * 0.6); dU += Math.round(tilt * 0.4); dCash -= tilt;
-          planRisk = { need: Math.round(need * 100), cap: Math.round(cap * 100), budget: Math.round(budget * 100), req: Math.round(req), years };
-          drivers.push(`Plan needs ~${req.toFixed(0)}%/yr over ${years}y → risk budget ${planRisk.budget}% (need ${planRisk.need} vs capacity ${planRisk.cap}) → ${tilt >= 0 ? "add" : "trim"} growth + crypto`);
-          if (years > 0 && years <= 3) { dCr -= 4; dCash += 4; drivers.push(`Within ${years}y of the goal → glide the volatile sleeve down`); }
-          if (need > cap + 0.2) planNote = `⚠ The goal implies ~${req.toFixed(0)}%/yr — more risk than a ${years}y horizon prudently carries. Maxing crypto to chase it raises ruin risk; better to extend the horizon, add contributions, or accept a lower target.`;
-        }
-      } catch (e) {}
-    }
-
-    let t = { us: base.us + dU, ca: base.ca + dCa, crypto: base.crypto + dCr, cash: Math.max(0, base.cash + dCash) };
-    // crypto sleeve held within its strategic band [floor, cap] — regime tilts inside the band, never to zero
-    const cFloor = CRYPTO_FLOOR[preset] != null ? CRYPTO_FLOOR[preset] : 7;
-    const cryptoCap = CRYPTO_CAP[preset] != null ? CRYPTO_CAP[preset] : 18;
-    const cryptoRaw = t.crypto;
-    t.crypto = Math.min(Math.max(t.crypto, cFloor), cryptoCap);
-    if (cryptoRaw < cFloor) drivers.push(`Crypto held at the ${preset} FIRE floor (${cFloor}%) despite regime drag — it's a strategic sleeve, not a tactical bet`);
-    else if (cryptoRaw > cryptoCap) drivers.push(`Crypto capped at the ${preset} risk budget (${cryptoCap}%)`);
-    // normalize to 100
-    const sum = t.us + t.ca + t.crypto + t.cash || 1;
-    t = { us: Math.round(t.us / sum * 100), ca: Math.round(t.ca / sum * 100), crypto: Math.round(t.crypto / sum * 100), cash: Math.round(t.cash / sum * 100) };
-    // fix rounding drift into cash
-    const drift = 100 - (t.us + t.ca + t.crypto + t.cash); t.cash += drift;
-
-    const note = preset === "conservative" ? "Conservative: Canada defensives + cash anchor the book; crypto is a tiny FIRE option."
-      : preset === "aggressive" ? "Aggressive: US growth leads, crypto is a real FIRE sleeve, minimal cash — sized to the regime."
-      : "Balanced: US growth and Canada defensives split the core; crypto is a measured volatile sleeve.";
-  // crypto cycle read: 4-year halving clock + net-liquidity (Raoul/Global-M2) overlay → phase +
-  // an expected forward annual-return band. Heuristic, NOT a prediction — the Chief's honest prior.
-  function cryptoCycle() {
-    const halving = new Date("2024-04-19").getTime();
-    const mo = Math.max(0, Math.round((Date.now() - halving) / (1000 * 60 * 60 * 24 * 30.4)));
-    const c = mo % 48;
-    let phase, lo, hi;
-    if (c < 12)      { phase = "Accumulation";     lo = 25;  hi = 60; }
-    else if (c < 18) { phase = "Markup";           lo = 40;  hi = 90; }
-    else if (c < 24) { phase = "Euphoria";         lo = -10; hi = 25; }
-    else if (c < 34) { phase = "Markdown";         lo = -40; hi = 0;  }
-    else             { phase = "Re-accumulation";  lo = 20;  hi = 55; }
-    // liquidity overlay: rising net liquidity pulls the band up (and can front-run the next leg)
-    const m = window.HelmFeed && window.HelmFeed.macro;
-    let liq = 0;
-    if (m && m.net_liquidity && m.net_liquidity.length > 60) {
-      const a = m.net_liquidity[m.net_liquidity.length - 1].v, b = m.net_liquidity[m.net_liquidity.length - 61].v;
-      liq = b ? (a - b) / Math.abs(b) : 0;
-    }
-    const adj = Math.round(liq * 120);
-    const liqRising = liq > 0.02, liqDraining = liq < -0.02;
-    // a strongly-rising-liquidity Markdown is treated as transitioning to Re-accumulation
-    const eff = (phase === "Markdown" && liqRising) ? "Re-accumulation" : phase;
-    return { phase, eff, months: c, lo: lo + adj, hi: hi + adj, liqRising, liqDraining };
-  }
-  const cyc = cryptoCycle();
-  const cryptoStanceObj = cryptoStance(cyc, bias);
-
-  // CRYPTO IS NOT MONOLITHIC — split the sleeve into BTC core / ETH-SOL growth / alt satellite,
-  // sized by the prudent risk budget AND the cycle phase, then nudged by regime.
-  function cryptoSplit(pct, b01, biasStr, cycle) {
-    if (!pct) return null;
-    const b = b01 == null ? 0.5 : b01;
-    let btc, growth, alt;
-    if (b <= 0.4)       { btc = 0.78; growth = 0.22; alt = 0.00; }
-    else if (b <= 0.65) { btc = 0.58; growth = 0.30; alt = 0.12; }
-    else                { btc = 0.42; growth = 0.35; alt = 0.23; }
-    // cycle tilt: early cycle funds growth/alts (beta), late cycle concentrates BTC and cuts satellites
-    const ph = cycle.eff;
-    if (ph === "Euphoria")              { btc = Math.min(0.9, btc + 0.18); alt = Math.max(0, alt - 0.15); growth = Math.max(0, 1 - btc - alt); }
-    else if (ph === "Markdown")         { btc = Math.min(0.95, btc + 0.25); alt = 0; growth = Math.max(0, 1 - btc - alt); }
-    else if (ph === "Markup")           { alt = alt + 0.08; growth = growth + 0.04; btc = Math.max(0.3, 1 - growth - alt); }
-    else if (ph === "Accumulation" || ph === "Re-accumulation") { btc = Math.min(0.85, btc + 0.06); growth = Math.max(0, 1 - btc - alt); } // BTC leads off the bottom; alts lag
-    if (/Risk-off|Defensive/.test(biasStr)) { btc = Math.min(0.92, btc + 0.10); alt = Math.max(0, alt - 0.08); growth = Math.max(0, 1 - btc - alt); }
-    const tBtc = Math.round(pct * btc), tAlt = Math.round(pct * alt);
-    const tGrowth = Math.max(0, pct - tBtc - tAlt);
-    const why = `${cycle.eff} phase (mo ${cycle.months}/48) · BTC est ${cycle.lo}–${cycle.hi}%/yr${cycle.liqRising ? " · liquidity rising" : cycle.liqDraining ? " · liquidity draining" : ""} → ${ph === "Markdown" || ph === "Euphoria" ? "concentrate the BTC core, cut satellites" : ph === "Markup" ? "let growth + a satellite run" : "BTC core leads off the base, alts still lag"}`;
-    return { btc: tBtc, growth: tGrowth, alt: tAlt, why, cycle };
-  }
-    const cryptoTiers = cryptoSplit(t.crypto, planRisk ? planRisk.budget / 100 : null, bias, cyc);
-
-    return { targets: t, drivers, usd, usCaRS: usCaRS(), bias, regimeLabel: r ? r.label : "—", note, cryptoCap, planNote, planRisk, cryptoTiers, cryptoCycle: cyc, cryptoStance: cryptoStanceObj };
-  };
-})();
+window.CompoundingMachine = CompoundingMachine;

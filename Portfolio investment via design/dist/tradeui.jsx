@@ -1,184 +1,214 @@
-// sigma.jsx — v2-C: index σ-bands + relative-strength leader rank.
-// window.HelmSigma: where a name sits, in standard deviations, vs its benchmark
-// (Nasdaq-100 / S&P 500 / TSX 60 proxy), plus a 6-mo RS percentile within the
-// held+universe scope. Real feed histories when live; deterministic synthetic
-// fallback (flagged real:false) in demo. Deterministic — no LLM.
-(function () {
-  const D = () => window.PMData;
+// tradeui.jsx — shared "Log a real trade" modal + trigger button.
+// Any page dispatches window.dispatchEvent(new CustomEvent("helm:log-trade", { detail:{...} }))
+// (see TradeButton below) and the single modal instance mounted in app.jsx's Dashboard opens.
+// Writes go through window.HelmRealTrades (realtrades.js) which patches the REAL portfolio.
 
-  function hashSeed(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) % 100000; }
+function fmtCcyLT(n, ccy) {
+  const sym = ccy === "USD" ? "US$" : "$";
+  return sym + Math.round(n || 0).toLocaleString("en-US");
+}
 
-  // ---- raw close series for any ticker (real feed EOD if present, else synthetic) ----
-  function seriesFor(ticker, n = 252) {
-    const P = window.HelmFeed && window.HelmFeed.prices;
-    const s = P && P[ticker];
-    if (Array.isArray(s) && s.length > 40) {
-      return { arr: s.slice(-n).map((r) => r.c != null ? r.c : r), real: true };
+function LogTradeModal({ prefill, accent, onClose }) {
+  const RT = window.HelmRealTrades;
+  const D = window.PMData;
+  const p = prefill || {};
+  const [ticker, setTicker] = React.useState(p.ticker || "");
+  const [side, setSide] = React.useState(p.side || "buy");
+  const [acct, setAcct] = React.useState(p.acctHint || "");
+  const [amount, setAmount] = React.useState(p.suggestedAmount ? String(Math.round(p.suggestedAmount)) : "");
+  const [priceStr, setPriceStr] = React.useState("");
+  const [priceTouched, setPriceTouched] = React.useState(false);
+  const [dca, setDca] = React.useState(p.tag === "dca");
+  const [done, setDone] = React.useState(null);
+
+  const tk = (ticker || "").trim().toUpperCase();
+  const menu = RT.tickerMenu();
+  const known = tk ? menu.find((m) => m.ticker === tk) : null;
+  const elig = React.useMemo(() => (tk ? RT.eligibleAccounts(tk) : (D.accounts || []).map((a) => a.id)), [tk]);
+
+  React.useEffect(() => {
+    if (tk && !priceTouched) {
+      const px = RT.priceFor(tk);
+      if (px) setPriceStr(String(px));
     }
-    // synthetic: seeded by ticker so it's stable across renders
-    const held = (D().allHoldings || []).find((h) => h.ticker === ticker);
-    const uni = (window.HelmUniverse || []).find((u) => u.ticker === ticker);
-    const px = held ? held.price : uni ? uni.price : 50;
-    const seed = held && held.seed != null ? held.seed : hashSeed(ticker);
-    const totalReturn = ((hashSeed(ticker + "r") % 90) - 30) / 100; // −30%..+60%, stable
-    return { arr: D().priceHistory(seed, n, px, totalReturn, 0.016), real: false };
-  }
+  }, [tk]);
 
-  const BENCH = {
-    ndx: { name: "Nasdaq-100", feedKeys: ["NDX", "^NDX", "QQQ"] },
-    spx: { name: "S&P 500", feedKeys: ["SPX", "^GSPC", "SPY"] },
-    tsx: { name: "TSX 60", feedKeys: ["TSX60", "XIU.TO", "TSX"] },
-  };
-  function benchSeries(key, n = 252) {
-    const b = BENCH[key] || BENCH.spx;
-    const P = window.HelmFeed && window.HelmFeed.prices;
-    if (P) for (const k of b.feedKeys) {
-      const s = P[k];
-      if (Array.isArray(s) && s.length > 40) return { arr: s.slice(-n).map((r) => r.c != null ? r.c : r), real: true, name: b.name };
+  React.useEffect(() => {
+    if (!acct || !elig.includes(acct)) {
+      const heldElig = elig.find((id) => RT.holdingsFor(tk, id));
+      setAcct(heldElig || elig[0] || "");
     }
-    const demo = key === "ndx" ? D().nasdaq : key === "spx" ? D().sp500 : D().priceHistory(991, 252, 100, 0.10, 0.006);
-    return { arr: demo.slice(-n), real: false, name: b.name };
+  }, [tk, elig.join(",")]);
+
+  const acctObj = (D.accounts || []).find((a) => a.id === acct);
+  const heldHere = tk && acct ? RT.holdingsFor(tk, acct) : null;
+
+  React.useEffect(() => {
+    if (p.fullSell && heldHere) setAmount(String(Math.round(heldHere.marketValue)));
+    // eslint-disable-next-line
+  }, [acct, tk, !!heldHere]);
+
+  const priceNum = parseFloat(priceStr) || 0;
+  const amountNum = parseFloat(amount) || 0;
+  const shares = priceNum > 0 ? amountNum / priceNum : 0;
+  const availCash = acctObj ? acctObj.cash || 0 : 0;
+  const maxSellShares = heldHere ? heldHere.shares : 0;
+
+  const overCash = side === "buy" && amountNum > availCash + 0.01;
+  const overShares = side === "sell" && shares > maxSellShares * 1.0001;
+  const canSubmit = !!tk && !!acct && priceNum > 0 && amountNum > 0 && !overCash && !overShares;
+
+  function submit() {
+    if (!canSubmit) return;
+    const nm = (known && known.name) || (heldHere && heldHere.name) || tk;
+    const sec = (known && known.sector) || (heldHere && heldHere.sector) || "—";
+    const ccy = (known && known.ccy) || (heldHere && heldHere.ccy) || (acctObj && acctObj.ccy) || "USD";
+    const sellShares = side === "sell" ? Math.min(shares, maxSellShares) : shares;
+    RT.log({
+      side, ticker: tk, name: nm, sector: sec, ccy,
+      acct, acctName: acctObj ? acctObj.name : acct,
+      shares: sellShares, price: priceNum,
+      amount: side === "sell" ? sellShares * priceNum : amountNum,
+      tag: dca ? "dca" : p.tag || null,
+      source: p.source || "Manual",
+      full: side === "sell" && heldHere ? Math.abs(sellShares - heldHere.shares) < 1e-6 : false,
+    });
+    setDone({ side, tk, acctName: acctObj ? acctObj.name : "" });
+    setTimeout(onClose, 800);
   }
 
-  // pick the natural benchmark for a name (crypto/US tech → NDX; CA-listed → TSX; else SPX)
-  // NOTE: allHoldings[].ccy is the DISPLAY currency (all CAD when toggle=CAD) — never use it
-  // for listing detection. Native listing = account the name is held in, or universe market.
-  function nativeCcy(t) {
-    if (/\.TO$|\.B$|\.UN$/.test(t)) return "CAD";
-    // a ticker can sit in several accounts (e.g. NVDA CDR in celi-cad + NVDA in celi-usd):
-    // if ANY holding is in a USD/crypto account, the bare symbol is the US listing
-    const rows = (D().allHoldings || []).filter((x) => x.ticker === t);
-    if (rows.length) return rows.some((x) => /usd|crypto/.test(x.acct || "")) ? "USD" : "CAD";
-    const uni = (window.HelmUniverse || []).find((u) => u.ticker === t);
-    if (uni) { if (uni.market) return uni.market === "CA" ? "CAD" : "USD"; if (uni.ccy) return uni.ccy; }
-    return "USD";
-  }
-  function benchKeyFor(h) {
-    const t = (h.ticker || h) + "";
-    const held = (D().allHoldings || []).find((x) => x.ticker === t) || {};
-    const uni = (window.HelmUniverse || []).find((u) => u.ticker === t) || {};
-    const sec = (typeof h === "object" && h.sector) || held.sector || uni.sector || "";
-    if (/Crypto/i.test(sec)) return "ndx"; // risk-asset benchmark for the crypto sleeve
-    if (nativeCcy(t) === "CAD") return "tsx";
-    if (/Semicond|Tech|Software|Internet|Communication/i.test(sec)) return "ndx";
-    return "spx";
-  }
+  return (
+    <div className="lt-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <style>{LT_CSS}</style>
+      <div className="lt-card">
+        {done ? (
+          <div className="lt-done">
+            <div className="lt-done-ico" style={{ background: accent }}>✓</div>
+            <div className="lt-done-txt">{done.side === "buy" ? "Buy" : "Sell"} logged</div>
+            <div className="lt-done-sub">{done.tk} · {done.acctName}</div>
+          </div>
+        ) : (
+          <React.Fragment>
+            <div className="lt-head">
+              <div>
+                <div className="lt-eyebrow">Log a real trade</div>
+                <div className="lt-sub">Records what you did at your broker — Helm has no brokerage connection and can't place orders.</div>
+              </div>
+              <button className="lt-x" onClick={onClose}>×</button>
+            </div>
 
-  // ---- the core: excess-return path vs the index + σ cone position ----
-  // z = cumulative log excess return ÷ (σ_daily_excess · √n)
-  function compute(ticker, benchKey, lookback = 252) {
-    const key = benchKey || benchKeyFor(ticker);
-    const s = seriesFor(ticker, lookback + 1), b = benchSeries(key, lookback + 1);
-    const n = Math.min(s.arr.length, b.arr.length);
-    if (n < 40) return null;
-    const sa = s.arr.slice(-n), ba = b.arr.slice(-n);
-    const ex = [0]; // cumulative log excess path, β = 1
-    const dEx = [];
-    for (let i = 1; i < n; i++) {
-      const d = Math.log(sa[i] / sa[i - 1]) - Math.log(ba[i] / ba[i - 1]);
-      dEx.push(d); ex.push(ex[ex.length - 1] + d);
-    }
-    const mean = dEx.reduce((a, v) => a + v, 0) / dEx.length;
-    const sd = Math.sqrt(dEx.reduce((a, v) => a + (v - mean) * (v - mean), 0) / dEx.length) || 0.0001;
-    const zPath = ex.map((e, i) => i === 0 ? 0 : e / (sd * Math.sqrt(i)));
-    const z = zPath[zPath.length - 1];
-    // z ~6 weeks ago, for "was +1.9σ in May" context
-    const zPrev = zPath[Math.max(0, zPath.length - 31)];
-    return { z, zPrev, zPath, ex, sigmaD: sd, n, real: s.real && b.real, benchKey: key, benchName: b.name,
-      zone: z >= 2 ? "extended" : z >= 1 ? "working" : z > -1 ? "band" : z > -2 ? "soft" : "broken" };
-  }
+            <div className="lt-side-toggle">
+              <button style={side === "buy" ? { background: "#0e9f6e", color: "#fff", borderColor: "#0e9f6e" } : {}} onClick={() => setSide("buy")}>Buy</button>
+              <button style={side === "sell" ? { background: "#e02424", color: "#fff", borderColor: "#e02424" } : {}} onClick={() => setSide("sell")}>Sell / Trim</button>
+            </div>
 
-  // ---- RS leader rank: 126-day return percentile within held + universe ----
-  let _rsCache = null, _rsStamp = 0;
-  function rsTable() {
-    if (_rsCache && Date.now() - _rsStamp < 120000) return _rsCache;
-    const seen = {};
-    (D().allHoldings || []).forEach((h) => { seen[h.ticker] = true; });
-    (window.HelmUniverse || []).forEach((u) => { seen[u.ticker] = true; });
-    const rows = Object.keys(seen).map((t) => {
-      const s = seriesFor(t, 130);
-      const a = s.arr; if (!a || a.length < 60) return null;
-      const r = a[a.length - 1] / a[0] - 1;
-      return { t, r, real: s.real };
-    }).filter(Boolean).sort((a, b) => a.r - b.r);
-    const out = {};
-    rows.forEach((row, i) => { out[row.t] = { pct: Math.round((i / (rows.length - 1)) * 100), r6m: row.r * 100, real: row.real }; });
-    _rsCache = out; _rsStamp = Date.now();
-    return out;
-  }
-  function rsRank(ticker) { return rsTable()[ticker] || null; }
+            <label className="lt-field">
+              <span>Ticker</span>
+              <input list="lt-ticker-menu" value={ticker} placeholder="e.g. NVDA, BTCY.B, XRP" autoFocus autoComplete="off"
+                     onChange={(e) => setTicker(e.target.value.toUpperCase())} />
+              <datalist id="lt-ticker-menu">
+                {menu.map((m) => <option key={m.ticker} value={m.ticker}>{m.name}</option>)}
+              </datalist>
+            </label>
 
-  // entry read used by the proposition engine (v2-A G3): leaders inside the band
-  function entryRead(ticker, benchKey) {
-    const sig = compute(ticker, benchKey);
-    const rs = rsRank(ticker);
-    if (!sig) return null;
-    const leader = rs && rs.pct >= 75;
-    const gate = sig.z >= 2 ? "block-chase" : sig.z <= -2 ? "block-knife" : "pass";
-    const setup = gate !== "pass" ? null
-      : leader && sig.z < 1 && sig.zPrev >= 1.2 ? "leader-pullback"
-      : leader && sig.z < 1 ? "leader-in-band"
-      : leader ? "leader-working"
-      : null;
-    return { ...sig, rs, leader, gate, setup };
-  }
+            <label className="lt-field">
+              <span>Account</span>
+              <select value={acct} onChange={(e) => setAcct(e.target.value)}>
+                {elig.length === 0 && <option value="">—</option>}
+                {elig.map((id) => {
+                  const a = (D.accounts || []).find((x) => x.id === id);
+                  if (!a) return null;
+                  return <option key={id} value={id}>{a.name} · {fmtCcyLT(a.cash, a.ccy)} cash</option>;
+                })}
+              </select>
+            </label>
 
-  // ---- compact strip visual for cards (z-path vs ±1/±2σ) ----
-  function SigmaStrip({ ticker, benchKey, height = 64 }) {
-    const r = compute(ticker, benchKey);
-    if (!r) return null;
-    const W = 320, H = height, n = r.zPath.length;
-    const x = (i) => (i / (n - 1)) * W;
-    const y = (z) => H / 2 - (Math.max(-2.6, Math.min(2.6, z)) / 2.6) * (H / 2 - 4);
-    const path = r.zPath.map((z, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(z).toFixed(1)}`).join(" ");
-    const line = (z, o) => <line x1="0" y1={y(z)} x2={W} y2={y(z)} stroke="currentColor" strokeOpacity={o} strokeWidth="1" strokeDasharray={z ? "3 3" : "0"} />;
-    return (
-      <div style={{ position: "relative" }}>
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }} preserveAspectRatio="none">
-          <rect x="0" y={y(1)} width={W} height={y(-1) - y(1)} fill="#2563eb" opacity="0.07"></rect>
-          {line(2, 0.18)}{line(1, 0.12)}{line(0, 0.25)}{line(-1, 0.12)}{line(-2, 0.18)}
-          <path d={path} fill="none" stroke="#121820" strokeWidth="1.6" vectorEffect="non-scaling-stroke"></path>
-          <circle cx={W} cy={y(r.z)} r="3.4" fill={r.z >= 2 ? "#e02424" : r.z <= -2 ? "#2563eb" : "#0e9f6e"}></circle>
-        </svg>
-        <span style={{ position: "absolute", right: 2, top: 0, fontSize: 9.5, fontFamily: "var(--mono)", color: "var(--muted)" }}>+2σ</span>
-        <span style={{ position: "absolute", right: 2, bottom: 0, fontSize: 9.5, fontFamily: "var(--mono)", color: "var(--muted)" }}>−2σ</span>
+            <div className="lt-row2">
+              <label className="lt-field">
+                <span>Price / unit</span>
+                <input value={priceStr} inputMode="decimal" placeholder="0.00"
+                       onChange={(e) => { setPriceTouched(true); setPriceStr(e.target.value); }} />
+              </label>
+              <label className="lt-field">
+                <span>{side === "buy" ? "Amount to spend" : "Amount to sell"}</span>
+                <input value={amount} inputMode="decimal" placeholder="0"
+                       onChange={(e) => setAmount(e.target.value)} />
+              </label>
+            </div>
+
+            {side === "buy" && (
+              <label className="lt-dca">
+                <input type="checkbox" checked={dca} onChange={(e) => setDca(e.target.checked)} />
+                Part of a DCA plan (tags it in the trade log)
+              </label>
+            )}
+
+            <div className="lt-preview">
+              <span>≈ <strong>{shares ? shares.toLocaleString("en-US", { maximumFractionDigits: shares < 10 ? 4 : 2 }) : "0"}</strong> shares/units</span>
+              {side === "buy"
+                ? <span className={overCash ? "lt-warn" : ""}>Cash after: <strong>{fmtCcyLT(availCash - amountNum, acctObj ? acctObj.ccy : "USD")}</strong></span>
+                : <span className={overShares ? "lt-warn" : ""}>Available: <strong>{maxSellShares.toLocaleString("en-US", { maximumFractionDigits: 4 })}</strong></span>}
+            </div>
+            {overCash && <div className="lt-err">More than this account's available cash ({fmtCcyLT(availCash, acctObj ? acctObj.ccy : "USD")}).</div>}
+            {overShares && <div className="lt-err">More than you hold here ({maxSellShares.toLocaleString("en-US", { maximumFractionDigits: 4 })}).</div>}
+
+            <div className="lt-actions">
+              <button className="lt-btn ghost" onClick={onClose}>Cancel</button>
+              <button className="lt-btn" disabled={!canSubmit} style={{ background: canSubmit ? accent : undefined, opacity: canSubmit ? 1 : 0.5 }} onClick={submit}>
+                Confirm {side === "buy" ? "buy" : "sell"}
+              </button>
+            </div>
+          </React.Fragment>
+        )}
       </div>
-    );
-  }
+    </div>
+  );
+}
 
-  // ---- log-trend channel (GMI "Compounding Machine" pattern): regression on log price,
-  // σ of residuals → distance-to-own-trend in σ. Absolute twin of the relative σ-band above.
-  // vsKey: null = own trend; "ndx"/"spx"/"tsx" = ratio vs index; "btc" = ratio vs Bitcoin.
-  // Ratio mode fits the channel on log(asset ÷ benchmark) — the Real Vision relative lens;
-  // px keeps the aligned ASSET price so $ accounting stays honest.
-  function logTrend(ticker, lookback = 1260, vsKey = null) {
-    const s = seriesFor(ticker, lookback);
-    let a = s.arr; if (!a || a.length < 120) return null;
-    let px = a, real = s.real, vsName = null;
-    if (vsKey && !(vsKey === "btc" && ticker === "BTC")) {
-      const b = vsKey === "btc" ? { ...seriesFor("BTC", lookback), name: "Bitcoin" } : benchSeries(vsKey, lookback);
-      const n0 = Math.min(a.length, b.arr.length); if (n0 < 120) return null;
-      const sa = a.slice(-n0), ba = b.arr.slice(-n0);
-      a = sa.map((v, i) => v / ba[i]); px = sa;
-      real = s.real && b.real; vsName = b.name;
-    }
-    const ln = a.map(Math.log), n = ln.length;
-    let sx = 0, sy = 0, sxx = 0, sxy = 0;
-    for (let i = 0; i < n; i++) { sx += i; sy += ln[i]; sxx += i * i; sxy += i * ln[i]; }
-    const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
-    const intercept = (sy - slope * sx) / n;
-    const resid = ln.map((v, i) => v - (intercept + slope * i));
-    const sd = Math.sqrt(resid.reduce((t, v) => t + v * v, 0) / n) || 1e-4;
-    const zPath = resid.map((v) => v / sd);
-    return { arr: a, px, vsName, slope, intercept, sd, z: zPath[n - 1], zPath, n, real,
-      fairNow: Math.exp(intercept + slope * (n - 1)),
-      cagr: Math.exp(slope * 252) - 1,          // trend growth, annualized
-      sigmaPct: Math.exp(sd) - 1,               // 1σ as % of fair value
-      zone: zPath[n - 1] <= -1 ? "buy" : zPath[n - 1] >= 1 ? "chip" : "neutral" };
-  }
+// Trigger used across pages — just dispatches the shared open-modal event (no prop drilling).
+function TradeButton({ label, ticker, side, amount, acctHint, source, tag, fullSell, small, style }) {
+  return (
+    <button className={"lt-trigger" + (small ? " sm" : "")} style={style} onClick={(e) => {
+      e.stopPropagation();
+      window.dispatchEvent(new CustomEvent("helm:log-trade", {
+        detail: { ticker, side, suggestedAmount: amount, acctHint, source, tag, fullSell },
+      }));
+    }}>
+      {label || (side === "sell" ? "Sell" : "Buy")}
+    </button>
+  );
+}
 
-  function bustCache() { _rsCache = null; _rsStamp = 0; }
+const LT_CSS = `
+.lt-overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.45); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 900; }
+.lt-card { width: 420px; max-width: calc(100vw - 32px); background: #fff; border-radius: 16px; padding: 20px 22px 18px; box-shadow: 0 24px 64px rgba(0,0,0,0.28); max-height: calc(100vh - 48px); overflow-y: auto; }
+.lt-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+.lt-eyebrow { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.lt-sub { font-size: 12px; color: var(--muted); margin-top: 3px; max-width: 300px; line-height: 1.4; }
+.lt-x { border: 0; background: none; font-size: 20px; line-height: 1; color: var(--muted); cursor: pointer; padding: 2px 6px; }
+.lt-x:hover { color: var(--ink); }
+.lt-side-toggle { display: flex; gap: 8px; margin-bottom: 14px; }
+.lt-side-toggle button { flex: 1; padding: 9px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel-2); font: inherit; font-weight: 700; font-size: 13px; cursor: pointer; color: var(--ink-2); }
+.lt-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.lt-field input, .lt-field select { font: inherit; font-size: 14px; font-weight: 500; padding: 9px 10px; border-radius: 9px; border: 1px solid var(--line); color: var(--ink); background: #fff; }
+.lt-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.lt-dca { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); margin: -2px 0 14px; }
+.lt-preview { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink-2); background: var(--panel-2); border-radius: 9px; padding: 9px 12px; margin-bottom: 6px; }
+.lt-preview strong { color: var(--ink); font-family: var(--mono); }
+.lt-warn { color: #d97706; }
+.lt-err { font-size: 12px; color: #e02424; margin: 6px 2px 0; }
+.lt-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.lt-btn { padding: 10px 18px; border-radius: 9px; border: 0; background: var(--accent, #0e9f6e); color: #fff; font: inherit; font-weight: 700; font-size: 13px; cursor: pointer; }
+.lt-btn.ghost { background: var(--panel-2); color: var(--ink-2); border: 1px solid var(--line); }
+.lt-btn:disabled { cursor: not-allowed; }
+.lt-done { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 26px 10px 14px; text-align: center; }
+.lt-done-ico { width: 44px; height: 44px; border-radius: 50%; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+.lt-done-txt { font-size: 16px; font-weight: 700; }
+.lt-done-sub { font-size: 12.5px; color: var(--muted); }
+.lt-trigger { font: inherit; font-size: 11.5px; font-weight: 700; padding: 4px 11px; border-radius: 7px; border: 1px solid var(--line); background: #fff; color: var(--ink-2); cursor: pointer; white-space: nowrap; }
+.lt-trigger:hover { background: var(--panel-2); border-color: var(--muted); }
+.lt-trigger.sm { padding: 3px 9px; font-size: 11px; }
+`;
 
-  window.HelmSigma = { seriesFor, benchSeries, benchKeyFor, nativeCcy, compute, rsRank, rsTable, entryRead, BENCH, bustCache, logTrend };
-  window.SigmaStrip = SigmaStrip;
-})();
+window.LogTradeModal = LogTradeModal;
+window.TradeButton = TradeButton;

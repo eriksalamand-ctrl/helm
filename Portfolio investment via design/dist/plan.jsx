@@ -1,287 +1,548 @@
-// nightloop.jsx — the Night Loop: bounded, automatic self-learning (A-Light).
-// Once per day, unattended, it runs the full learn cycle the design docs describe:
-//   1 OBSERVE   read the Reflexion ledger (predicted vs realized, real journals)
-//   2 DIAGNOSE  find the worst calibrated bucket with a real sample (n ≥ 8)
-//   3 PROPOSE   map that failure to ONE candidate rule from the Learning-Lab library
-//   4 REPLAY    walk-forward the current live engine vs live+rule on real history
-//               (purged/embargoed split — same discipline as the Lab)
-//   5 GATE      acceptance checks (§17 style); fail → journal & stop
-//   6 STAGE     passing edits wait for one-tap approval (or auto-apply if the user
-//               explicitly enabled it — still config-level, reversible, journaled)
-// Hard bounds: config-level rules only (no retrain, no orders), one edit per day,
-// rejected rules blacklisted 14 days, every run journaled even when nothing changes.
-(function () {
-  const KEY = "helm_nightloop_v1";
-  const { useState: useNlState, useEffect: useNlEffect } = React;
+// plan.jsx — Policy & Funded-Ratio module (Strategic Layers 0–4 + governance)
+// Reads net liquidity from window.PMData; persists the plan to localStorage.
+const { useState: usePlanState, useEffect: usePlanEffect } = React;
 
-  const load = () => { try { return JSON.parse(localStorage.getItem(KEY) || "null") || { runs: [], pending: null, rejected: {}, autoApply: false }; } catch (e) { return { runs: [], pending: null, rejected: {}, autoApply: false }; } };
-  const save = (j) => { try { localStorage.setItem(KEY, JSON.stringify(j)); } catch (e) {} };
-  const today = () => new Date().toISOString().slice(0, 10);
-  const notify = () => { try { window.dispatchEvent(new Event("helm:nightloop")); } catch (e) {} };
+const PLAN_KEY = "helm.plan.v1";
+const PLAN_DEFAULTS = {
+  currentAge: 40,
+  retireAge: 55,
+  annualSpending: 80000,
+  withdrawalRate: 4,       // %
+  annualContribution: 30000,
+  planningReturn: 8,       // % — conservative base, NOT the 60% ambition
+  riskProfile: "Aggressive",
+  specCap: 30,             // % speculative hard cap
+  maxDrawdown: 20,         // %
+  govMode: "Warn",         // Off | Warn | Confirm
+  cycleState: "Normal",    // Normal | Elevated | Partial | Extreme
+  acctGov: { "reer-cad": true, "reer-usd": true, "celi-cad": true, "celi-usd": true },
+  overrides: [],
+};
 
-  // ---- 2→3: map a calibration failure to the candidate rule that targets it ----
-  // evError > 0 = overconfident (predicted better than realized) → suppressors;
-  // evError < 0 = too timid (realized beat prediction) → additive rules.
-  function ruleFor(bucket, active, rejected) {
-    const over = bucket.evError > 0;
-    const order = over
-      ? (/crypto/i.test(bucket.key) ? ["rsi-exit", "trend-gate", "value-guard", "quality-floor", "regime-tilt"]
-        : /defensive|risk-off|stagflation|slowdown|contraction/i.test(bucket.key) ? ["regime-tilt", "trend-gate", "quality-floor", "rsi-exit", "value-guard"]
-        : ["trend-gate", "rsi-exit", "quality-floor", "value-guard", "regime-tilt"])
-      : ["oversold-add", "value-conviction", "breakout-add", "regime-tilt"];
-    const lib = window.HelmCandidateRules || {};
-    const cut = Date.now() - 14 * 86400000;
-    return order.find((id) => lib[id] && !active.includes(id) && !(rejected[id] && new Date(rejected[id]).getTime() > cut)) || null;
-  }
+function loadPlan() {
+  try { return { ...PLAN_DEFAULTS, ...JSON.parse(localStorage.getItem(PLAN_KEY) || "{}"),
+                 acctGov: { ...PLAN_DEFAULTS.acctGov, ...(JSON.parse(localStorage.getItem(PLAN_KEY) || "{}").acctGov || {}) } }; }
+  catch (e) { return { ...PLAN_DEFAULTS }; }
+}
 
-  // ---- 4: compact walk-forward replay (purged + embargoed, long-only, like the Lab) ----
-  function replayTicker(hist, meta, cfg, extraApply) {
-    const N = hist.length, FEAT = 28, HZ = 5;
-    const start = Math.floor(N / 2) + FEAT; // test on newest half, embargo the feature window
-    const daily = [], flags = [];
-    let inMkt = false;
-    for (let t = start; t < N - HZ; t++) {
-      const w28 = hist.slice(Math.max(0, t - 27), t + 1).map((c, i, a) => (c / a[0]) * 50);
-      const synth = { ticker: meta.ticker, sector: meta.sector, price: hist[t], spark: w28, divYield: meta.divYield || 0, plPct: 0, weight: 0 };
-      let s = { ...window.signalsFor(synth, cfg) };
-      if (extraApply) s = extraApply(s);
-      const was = inMkt; inMkt = s.action === "Buy";
-      flags.push(was !== inMkt);
-      daily.push(inMkt ? (hist[t + 1] / hist[t] - 1) : 0);
+// ---- profile presets: target weight + band per strategic bucket ----
+const BUCKETS = ["Core Growth", "Ballast", "Satellite", "Volatile Offense"];
+const PROFILE_TARGETS = {
+  Conservative: { "Core Growth": [55, 45, 65], Ballast: [35, 25, 45], Satellite: [7, 0, 12], "Volatile Offense": [3, 0, 8] },
+  Balanced:     { "Core Growth": [58, 45, 65], Ballast: [22, 12, 30], Satellite: [12, 8, 18], "Volatile Offense": [8, 3, 15] },
+  Aggressive:   { "Core Growth": [50, 42, 62], Ballast: [12, 8, 22], Satellite: [18, 10, 24], "Volatile Offense": [20, 8, 30] },
+};
+const BUCKET_DESC = {
+  "Core Growth": "Broad ETFs, quality compounders, semis",
+  Ballast: "Income, utilities, REITs, cash",
+  Satellite: "Single-name thematic conviction",
+  "Volatile Offense": "Crypto, micro-caps — high volatility by design, not low quality",
+};
+
+function bucketOf(h) {
+  if (h.sector === "Crypto") return "Volatile Offense";
+  if ((h.price || 0) < 1.5) return "Volatile Offense";
+  if (h.sector === "Real Estate") return "Ballast";
+  if (["ZWU", "ZWP", "ZGI"].includes(h.ticker)) return "Ballast";
+  if (h.sector === "ETF") return "Core Growth";
+  if (["Semiconductors", "Consumer", "Financials", "Energy"].includes(h.sector)) return "Core Growth";
+  return "Satellite";
+}
+
+function fundedCalc(p, current) {
+  const n = Math.max(0, p.retireAge - p.currentAge);
+  const r = p.planningReturn / 100;
+  const required = p.withdrawalRate > 0 ? p.annualSpending / (p.withdrawalRate / 100) : 0;
+  const grown = current * Math.pow(1 + r, n);
+  const contribFV = r > 0 ? p.annualContribution * ((Math.pow(1 + r, n) - 1) / r) : p.annualContribution * n;
+  const projected = grown + contribFV;
+  const ratio = required > 0 ? projected / required : 0;
+  const status = ratio < 0.9 ? "Behind" : ratio <= 1.1 ? "On Track" : "Ahead";
+  // required CAGR to fully fund the goal: solve projected(rr) = required via bisection
+  let requiredReturn = null;
+  if (required > 0 && n > 0) {
+    let lo = -0.5, hi = 2.0;
+    for (let k = 0; k < 64; k++) {
+      const m = (lo + hi) / 2;
+      const g = current * Math.pow(1 + m, n) + (Math.abs(m) > 1e-9 ? p.annualContribution * ((Math.pow(1 + m, n) - 1) / m) : p.annualContribution * n);
+      if (g < required) lo = m; else hi = m;
     }
-    return { daily, flags };
+    requiredReturn = ((lo + hi) / 2) * 100;
   }
+  return { n, required, projected, grown, contribFV, ratio, status, requiredReturn };
+}
 
-  function kpis(runs) {
-    const maxLen = Math.max(...runs.map((r) => r.daily.length));
-    const pooled = [], flags = [];
-    for (let i = 0; i < maxLen; i++) {
-      const day = runs.map((r) => r.daily[i]).filter((x) => x != null);
-      pooled.push(day.length ? day.reduce((s, x) => s + x, 0) / day.length : 0);
-      flags.push(runs.some((r) => r.flags[i]));
-    }
-    const n = pooled.length || 1;
-    const eq = pooled.reduce((a, r) => { a.push((a[a.length - 1] || 1) * (1 + r)); return a; }, []);
-    const cagr = (Math.pow(eq[eq.length - 1] || 1, 252 / n) - 1) * 100;
-    const mean = pooled.reduce((s, x) => s + x, 0) / n;
-    const sd = Math.sqrt(pooled.reduce((s, x) => s + (x - mean) * (x - mean), 0) / n) || 1e-9;
-    const dn = Math.sqrt(pooled.reduce((s, x) => s + (x < 0 ? x * x : 0), 0) / n) || 1e-9;
-    let peak = 1, mdd = 0;
-    eq.forEach((v) => { peak = Math.max(peak, v); mdd = Math.min(mdd, (v / peak - 1) * 100); });
-    const timeIn = (pooled.filter((x) => x !== 0).length / n) * 100;
-    const turnover = flags.filter(Boolean).length / (n / 252);
-    return { cagr, sharpe: (mean * 252) / (sd * Math.sqrt(252)), sortino: (mean * 252) / (dn * Math.sqrt(252)), mdd, timeIn, turnover: turnover / 100 };
-  }
+const STATUS_COLOR = { Behind: "#d97706", "On Track": "#0e9f6e", Ahead: "#2563eb" };
+const CYCLE_TIERS = [
+  { k: "Normal", label: "Normal", note: "Full tactical freedom within policy." },
+  { k: "Elevated", label: "Elevated Caution", note: "No new speculative adds; trim the most stretched." },
+  { k: "Partial", label: "Partial De-Risk", note: "Trim affected sleeve; raise ballast / cash." },
+  { k: "Extreme", label: "Extreme De-Risk", note: "Mandatory larger trim; defensive actions only." },
+];
 
-  // ---- 5: acceptance gates (§17, compact) ----
-  function gates(base, cand) {
-    const differs = Math.abs(cand.sharpe - base.sharpe) > 0.03 || Math.abs(cand.cagr - base.cagr) > 0.3 || Math.abs(cand.mdd - base.mdd) > 0.3;
-    const checks = [
-      { k: "Engine actually traded", pass: cand.turnover > 0.0005 && cand.timeIn > 1 },
-      { k: "Candidate differs from baseline", pass: differs },
-      { k: "Sharpe improves (≥+0.05 & ≥5%)", pass: cand.sharpe - base.sharpe >= 0.05 && cand.sharpe >= base.sharpe * 1.05 },
-      { k: "Sortino not worse", pass: cand.sortino >= base.sortino - 0.02 },
-      { k: "Max drawdown not worse (−0.5pp tol)", pass: cand.mdd >= base.mdd - 0.5 },
-      { k: "CAGR drop ≤3pp", pass: cand.cagr >= base.cagr - 3 },
-    ];
-    return { checks, accepted: checks.every((c) => c.pass) };
-  }
+const planMoney = (n, ccy) => "$" + Math.round(n).toLocaleString("en-US") + (ccy ? " " + ccy : "");
+const planMoneyK = (n) => Math.abs(n) >= 1e6 ? "$" + (n / 1e6).toFixed(2) + "M" : "$" + Math.round(n / 1000) + "k";
 
-  // ---- the nightly run ----
-  let running = false;
-  async function run(force) {
-    if (running) return; running = true;
-    const t0 = Date.now();
-    const J = load();
-    try {
-      if (!force && J.runs.length && J.runs[0].d === today()) return; // once per day
-      if (J.pending) return; // a staged edit is waiting on the human — don't stack
-      const log = (entry) => { J.runs.unshift({ d: today(), ms: Date.now() - t0, ...entry }); J.runs = J.runs.slice(0, 45); save(J); notify(); };
+// ---- funded-ratio radial gauge ----
+function FundedGauge({ ratio, status, accent }) {
+  const W = 240, H = 150, cx = W / 2, cy = 130, R = 104;
+  const max = 1.4;
+  const a0 = Math.PI, a1 = 0; // semicircle left→right
+  const frac = Math.max(0, Math.min(1, ratio / max));
+  const ang = a0 + (a1 - a0) * frac;
+  const pt = (a, r) => [cx + r * Math.cos(a), cy - r * Math.sin(a)];
+  const arc = (from, to, r) => {
+    const [x0, y0] = pt(from, r), [x1, y1] = pt(to, r);
+    const large = Math.abs(to - from) > Math.PI ? 1 : 0;
+    return `M${x0.toFixed(1)},${y0.toFixed(1)} A${r},${r} 0 ${large} 1 ${x1.toFixed(1)},${y1.toFixed(1)}`;
+  };
+  const seg = (lo, hi) => [a0 + (a1 - a0) * (lo / max), a0 + (a1 - a0) * (hi / max)];
+  const [b0, b1] = seg(0, 0.9), [o0, o1] = seg(0.9, 1.1), [aa0, aa1] = seg(1.1, max);
+  const [hx, hy] = pt(ang, R);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: 280, display: "block", margin: "0 auto" }}>
+      <path d={arc(b0, b1, R)} stroke="#d97706" strokeOpacity="0.28" strokeWidth="14" fill="none" strokeLinecap="round" />
+      <path d={arc(o0, o1, R)} stroke="#0e9f6e" strokeOpacity="0.30" strokeWidth="14" fill="none" />
+      <path d={arc(aa0, aa1, R)} stroke="#2563eb" strokeOpacity="0.28" strokeWidth="14" fill="none" strokeLinecap="round" />
+      <line x1={cx} y1={cy} x2={hx.toFixed(1)} y2={hy.toFixed(1)} stroke={STATUS_COLOR[status]} strokeWidth="3" strokeLinecap="round" />
+      <circle cx={cx} cy={cy} r="6" fill={STATUS_COLOR[status]} />
+      <text x={cx} y={cy - 34} textAnchor="middle" style={{ fontSize: 34, fontWeight: 700, fill: STATUS_COLOR[status], fontFamily: "var(--mono)" }}>{(ratio * 100).toFixed(0)}%</text>
+      <text x={cx} y={cy - 14} textAnchor="middle" style={{ fontSize: 11, fill: "var(--muted)", letterSpacing: "0.05em" }}>FUNDED RATIO</text>
+    </svg>
+  );
+}
 
-      if (!window.HelmReflexion || !window.signalsFor || !window.helmPresetCfg) { log({ verdict: "skipped", reason: "engine modules not loaded" }); return; }
+function PlanField({ label, value, onChange, prefix, suffix, step = 1, min = 0, hint }) {
+  return (
+    <label className="plan-field">
+      <span className="plan-field-label">{label}{hint && <i className="plan-hint" title={hint}>?</i>}</span>
+      <span className="plan-input">
+        {prefix && <span className="plan-affix">{prefix}</span>}
+        <input type="number" value={value} step={step} min={min}
+               onChange={(e) => onChange(e.target.value === "" ? 0 : +e.target.value)} />
+        {suffix && <span className="plan-affix r">{suffix}</span>}
+      </span>
+    </label>
+  );
+}
 
-      // 1–2 OBSERVE + DIAGNOSE (regime + theme + horizon-age buckets, plus macro drift)
-      const c = window.HelmReflexion.compute();
-      const drift = c.drift || null; // recent-half vs older-half hit-rate — domain-drift signal
-      const buckets = [...(c.byRegime || []), ...(c.byTheme || []), ...(c.byHorizon || [])].filter((b) => b.n >= 8 && Math.abs(b.evError) > 0.06)
-        .sort((a, b) => Math.abs(b.evError) - Math.abs(a.evError));
-      const resolved = c.resolved != null ? c.resolved : (c.rows || []).length;
-      if (!buckets.length) { log({ verdict: "no-edit", reason: `insufficient evidence — no bucket with n≥8 and |EV error|>6% yet (${resolved} predictions resolved${drift && drift.delta < -0.1 ? `; ⚠ drift: recent hit ${Math.round(drift.recent * 100)}% vs ${Math.round(drift.old * 100)}% older` : ""}). The ledger keeps accruing.` }); return; }
-      const bucket = buckets[0];
+function ChoiceField({ label, value, onChange, options, prefix, suffix, step = 1, fmt, hint }) {
+  return (
+    <label className="plan-field">
+      <span className="plan-field-label">{label}{hint && <i className="plan-hint" title={hint}>?</i>}</span>
+      <div className="plan-chips">
+        {options.map((o) => (
+          <button type="button" key={o} className={`plan-chip${Math.abs(value - o) < 1e-6 ? " on" : ""}`}
+                  onClick={() => onChange(o)}>{fmt ? fmt(o) : o}</button>
+        ))}
+      </div>
+      <span className="plan-input">
+        {prefix && <span className="plan-affix">{prefix}</span>}
+        <input type="number" value={value} step={step} min={0}
+               onChange={(e) => onChange(e.target.value === "" ? 0 : +e.target.value)} />
+        {suffix && <span className="plan-affix r">{suffix}</span>}
+      </span>
+    </label>
+  );
+}
 
-      // 3 PROPOSE
-      const active = window.HelmConfig ? window.HelmConfig.activeRules() : [];
-      const ruleId = ruleFor(bucket, active, J.rejected || {});
-      if (!ruleId) { log({ verdict: "no-edit", reason: `worst bucket "${bucket.key}" (EV err ${(bucket.evError * 100).toFixed(0)}%, n=${bucket.n}) — but every matching rule is already active, or was rejected <14d ago.`, bucket: { k: bucket.key, ev: bucket.evError, n: bucket.n } }); return; }
-      const meta = (window.HelmCandidateRuleMeta || {})[ruleId] || { name: ruleId, desc: "" };
-      const apply = window.HelmCandidateRules[ruleId];
+function PlanPage({ accent, account }) {
+  const D = window.PMData;
+  const ccy = D.getDispCcy ? D.getDispCcy() : "CAD";
+  const [p, setP] = usePlanState(loadPlan);
+  const [trimPreview, setTrimPreview] = usePlanState(null);
+  usePlanEffect(() => { try { localStorage.setItem(PLAN_KEY, JSON.stringify(p)); } catch (e) {} }, [p]);
+  const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
 
-      // 4 REPLAY on the top-8 held names by value (real feed history when live)
-      const D = window.PMData;
-      const byT = {};
-      (D.allHoldings || []).forEach((h) => { const q = h.qty || h.q || 0; byT[h.ticker] = byT[h.ticker] || { ticker: h.ticker, sector: h.sector, divYield: h.divYield || 0, mv: 0 }; byT[h.ticker].mv += h.marketValue || h.price * q; });
-      const picks = Object.values(byT).sort((a, b) => b.mv - a.mv).slice(0, 8);
-      const st = window.computeHelmState ? window.computeHelmState() : null;
-      const cfg = window.helmPresetCfg((st ? st.p.riskProfile : "Balanced").toLowerCase()); // NON-raw: baseline includes already-applied rules
-      const baseRuns = [], candRuns = [];
-      let realN = 0;
-      for (const p of picks) {
-        const s = window.HelmSigma ? window.HelmSigma.seriesFor(p.ticker, 504) : null;
-        if (!s || s.arr.length < 160) continue;
-        if (s.real) realN++;
-        baseRuns.push(replayTicker(s.arr, p, cfg, null));
-        candRuns.push(replayTicker(s.arr, p, cfg, apply));
-        await new Promise((r) => setTimeout(r)); // keep the UI responsive
-      }
-      if (!baseRuns.length) { log({ verdict: "skipped", reason: "no usable history for replay" }); return; }
-      const base = kpis(baseRuns), cand = kpis(candRuns);
+  const view = D.buildView("all");
+  const current = view.kpis.equity;
 
-      // 5 GATE
-      const g = gates(base, cand);
-      const runEntry = {
-        verdict: g.accepted ? "staged" : "rejected-by-gates",
-        bucket: { k: bucket.key, ev: bucket.evError, n: bucket.n },
-        ruleId, ruleName: meta.name, ruleDesc: meta.desc,
-        rationale: `${bucket.key}: engine ${bucket.evError > 0 ? "overshoots" : "undershoots"} realized EV by ${(Math.abs(bucket.evError) * 100).toFixed(0)}% (n=${bucket.n}) → tested "${meta.name}"`,
-        base, cand, checks: g.checks, dataReal: `${realN}/${baseRuns.length} real series`,
-      };
-      if (!g.accepted) { log(runEntry); return; }
+  const f = fundedCalc(p, current);
+  const targets = PROFILE_TARGETS[p.riskProfile] || PROFILE_TARGETS.Aggressive;
 
-      // 6 STAGE (or auto-apply if the human explicitly turned that on)
-      if (J.autoApply && window.HelmConfig) {
-        window.HelmConfig.apply({ rules: [...active, ruleId], meta: { source: "night-loop (auto)", label: meta.name, note: runEntry.rationale } });
-        log({ ...runEntry, verdict: "auto-applied" });
-      } else {
-        J.pending = { ...runEntry, d: today() };
-        log(runEntry);
-      }
-    } finally { running = false; }
-  }
+  // ---- current strategic buckets ----
+  const sums = { "Core Growth": 0, Ballast: 0, Satellite: 0, "Volatile Offense": 0 };
+  view.holdings.forEach((h) => { sums[bucketOf(h)] += h.dispValue; });
+  sums.Ballast += view.kpis.cash;
+  const eq = current || 1;
+  const bucketPct = {};
+  BUCKETS.forEach((b) => (bucketPct[b] = (sums[b] / eq) * 100));
+  const specPct = bucketPct["Volatile Offense"];
+  const specOver = specPct - p.specCap;
+  const specBreach = specOver > 0.5;
 
-  function approve() {
-    const J = load(); if (!J.pending) return;
-    const active = window.HelmConfig ? window.HelmConfig.activeRules() : [];
-    if (window.HelmConfig && !active.includes(J.pending.ruleId)) {
-      window.HelmConfig.apply({ rules: [...active, J.pending.ruleId], meta: { source: "night-loop (approved)", label: J.pending.ruleName, note: J.pending.rationale } });
-    }
-    J.runs.unshift({ d: today(), verdict: "applied", ruleId: J.pending.ruleId, ruleName: J.pending.ruleName, reason: "approved by user" });
-    J.pending = null; save(J); notify();
-  }
-  function reject() {
-    const J = load(); if (!J.pending) return;
-    J.rejected = J.rejected || {}; J.rejected[J.pending.ruleId] = today();
-    J.runs.unshift({ d: today(), verdict: "rejected", ruleId: J.pending.ruleId, ruleName: J.pending.ruleName, reason: "rejected by user — blacklisted 14d" });
-    J.pending = null; save(J); notify();
-  }
-  function setAutoApply(v) { const J = load(); J.autoApply = !!v; save(J); notify(); }
+  // ---- glidepath posture ----
+  let basePosture = f.n > 15 ? "Growth-Favoring" : f.n >= 10 ? "Mild Ballast Lean" : f.n >= 5 ? "Moderate Ballast" : "Capital Preservation";
+  const overlay = f.status === "Ahead" ? "accelerate de-risk" : f.status === "Behind" ? "no extra de-risking" : "follow base glidepath";
 
-  // ---- Bridge rail card ----
-  function NightLoopCard() {
-    const [, force] = useNlState(0);
-    const [open, setOpen] = useNlState(false);
-    useNlEffect(() => {
-      const h = () => force((n) => n + 1);
-      window.addEventListener("helm:nightloop", h);
-      return () => window.removeEventListener("helm:nightloop", h);
-    }, []);
-    const J = load();
-    const last = J.runs[0];
-    const P = J.pending;
-    const num = (n, dp = 2) => n == null || isNaN(n) ? "—" : n.toFixed(dp);
-    const Kpi = ({ l, b, c, dp = 2, pct }) => (
-      <div className="nl-kpi"><span>{l}</span><b className="mono">{num(b, dp)}{pct ? "%" : ""} → <i style={{ color: (c >= b) === (l !== "Max DD") || c === b ? "#0e9f6e" : "#e02424" }}>{num(c, dp)}{pct ? "%" : ""}</i></b></div>
-    );
-    return (
-      <section className="pm-card nl-card">
-        <div className="nl-head">
-          <span className="nl-eyebrow">Night loop · self-learning{P ? " — 1 pending" : ""}</span>
-          <label className="nl-auto" title="When on, gate-passing edits apply without waiting (still config-level, reversible, journaled)">
-            <input type="checkbox" checked={!!J.autoApply} onChange={(e) => setAutoApply(e.target.checked)} /> auto-apply
+  // auto cycle flag
+  const autoTier = specBreach && f.status === "Ahead" ? "Partial" : specBreach ? "Elevated" : "Normal";
+
+  const accts = [...D.accounts, { id: "crypto", name: "Crypto", label: "Digital-asset lens" }];
+
+  // simulate trim to cap
+  const trimAmt = specBreach ? (specOver / 100) * eq : 0;
+  const logOverride = () => {
+    const entry = { date: new Date().toISOString().slice(0, 10), spec: +specPct.toFixed(1), cap: p.specCap, note: "Accepted volatile-offense over budget" };
+    setP((s) => ({ ...s, overrides: [entry, ...(s.overrides || [])].slice(0, 8) }));
+    setTrimPreview(null);
+  };
+
+  return (
+    <div className="plan">
+      <style>{PLAN_CSS}</style>
+
+      {/* status strip removed — Funded/Posture/Cycle/Volatile already live in the global topbar spine */}
+
+      {/* enforced IPS constraint panel — the policy every proposal is checked against */}
+      {window.IPSPanel ? <window.IPSPanel accent={accent} /> : null}
+
+      {/* ---------- breach banner ---------- */}
+      {specBreach && p.govMode !== "Off" && (
+        <div className={`plan-banner ${p.govMode === "Confirm" ? "confirm" : "warn"}`}>
+          <div className="plan-banner-ico">▲</div>
+          <div className="plan-banner-body">
+            <strong>Volatile-offense sleeve at {specPct.toFixed(0)}% — {specOver.toFixed(0)} pts above your {p.specCap}% risk budget.</strong>
+            <span>Profile <em>{p.riskProfile}</em> · funded status <em>{f.status}</em>. {f.status === "Ahead"
+              ? "When Ahead the model recommends de-risking, not adding volatility."
+              : "Visible warning only — your call to override."}</span>
+          </div>
+          <div className="plan-banner-actions">
+            <button className="plan-btn ghost" title="Preview a trim back to cap" onClick={() => setTrimPreview(trimPreview ? null : { amt: trimAmt, from: +specPct.toFixed(1), to: p.specCap })}>Simulate trim ≈ {planMoneyK(trimAmt)}</button>
+            <button className="plan-btn solid" style={{ background: accent }} onClick={logOverride}>Override &amp; accept</button>
+          </div>
+        </div>
+      )}
+      {trimPreview && (
+        <div className="plan-trimsim">
+          <strong>Simulated trim:</strong> selling ≈{planMoneyK(trimPreview.amt)} of the volatile-offense sleeve brings it from <strong>{trimPreview.from}%</strong> back to your <strong>{trimPreview.to}% budget</strong>. Proceeds rotate to Core Growth / Ballast per your target weights. <em>Preview only — no order placed.</em>
+          <div className="plan-trimsim-actions">
+            <button className="plan-btn ghost" onClick={() => setTrimPreview(null)}>Dismiss</button>
+            <button className="plan-btn solid" style={{ background: accent }} onClick={() => { const entry = { date: new Date().toISOString().slice(0, 10), spec: +specPct.toFixed(1), cap: p.specCap, note: `Logged simulated trim of ${planMoneyK(trimPreview.amt)} to cap` }; setP((s) => ({ ...s, overrides: [entry, ...(s.overrides || [])].slice(0, 8) })); setTrimPreview(null); }}>Log this trim</button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- top: funded ratio + breakdown ---------- */}
+      <div className="plan-grid2">
+        <section className="pm-card plan-funded">
+          <div className="pm-card-eyebrow">Funded ratio · retire at {p.retireAge}</div>
+          <FundedGauge ratio={f.ratio} status={f.status} accent={accent} />
+          <div className="plan-funded-legend">
+            <span><i style={{ background: "#d97706" }} />Behind &lt;90%</span>
+            <span><i style={{ background: "#0e9f6e" }} />On track</span>
+            <span><i style={{ background: "#2563eb" }} />Ahead &gt;110%</span>
+          </div>
+          <p className="plan-funded-note">
+            Projected <strong>{planMoneyK(f.projected)}</strong> vs <strong>{planMoneyK(f.required)}</strong> required,
+            in {f.n} yrs at a <strong>{p.planningReturn}%</strong> planning return. This is the conservative base that
+            decides whether you're on track — not your 60%/yr ambition.
+          </p>
+          {f.requiredReturn != null && (
+            <div className="plan-reqret">
+              <span>Required to fully fund the goal</span>
+              <strong className="mono" style={{ color: f.requiredReturn > p.planningReturn + 0.05 ? "#d97706" : "#0e9f6e" }}>{f.requiredReturn.toFixed(1)}%/yr</strong>
+              <em>{f.requiredReturn > p.planningReturn + 0.05 ? `${(f.requiredReturn - p.planningReturn).toFixed(1)} pts above your ${p.planningReturn}% base — return pressure` : `at or below your ${p.planningReturn}% base — no extra pressure`}</em>
+            </div>
+          )}
+        </section>
+
+        <section className="pm-card plan-break">
+          <div className="pm-card-eyebrow">How it's built</div>
+          <div className="plan-break-rows">
+            <div className="plan-brow"><span>Current investable capital</span><strong className="mono">{planMoney(current, ccy)}</strong></div>
+            <div className="plan-brow"><span>Grows to (at {p.planningReturn}%/yr × {f.n}y)</span><strong className="mono">{planMoney(f.grown)}</strong></div>
+            <div className="plan-brow"><span>+ Contributions future value</span><strong className="mono">{planMoney(f.contribFV)}</strong></div>
+            <div className="plan-brow total"><span>Projected capital at {p.retireAge}</span><strong className="mono" style={{ color: STATUS_COLOR[f.status] }}>{planMoney(f.projected)}</strong></div>
+            <div className="plan-brow"><span>Required = spending ÷ {p.withdrawalRate}% rule</span><strong className="mono">{planMoney(f.required)}</strong></div>
+          </div>
+          <div className="plan-gap">
+            {f.status === "Behind"
+              ? <span style={{ color: "#d97706" }}>Gap of {planMoneyK(f.required - f.projected)} — return pressure is <strong>High</strong>. Tactical offense allowed within policy.</span>
+              : f.status === "On Track"
+                ? <span style={{ color: "#0e9f6e" }}>On track — return pressure Normal. Stay disciplined.</span>
+                : <span style={{ color: "#2563eb" }}>Surplus of {planMoneyK(f.projected - f.required)} — risk-reducing actions only.</span>}
+          </div>
+        </section>
+      </div>
+
+      {/* ---------- plan inputs ---------- */}
+      <section className="pm-card">
+        <div className="pm-card-head">
+          <div className="pm-card-eyebrow">Plan inputs · your one-page IPS</div>
+          <span className="plan-saved">saved locally</span>
+        </div>
+        <div className="plan-fields">
+          <PlanField label="Current age" value={p.currentAge} onChange={(v) => set("currentAge", v)} min={18} />
+          <PlanField label="Target retirement age" value={p.retireAge} onChange={(v) => set("retireAge", v)} min={p.currentAge + 1} />
+          <ChoiceField label="Annual spending in retirement" value={p.annualSpending} onChange={(v) => set("annualSpending", v)} prefix="$" step={1000}
+                       options={[50000, 70000, 90000, 120000]} fmt={(o) => "$" + (o / 1000) + "k"} hint="Pick a band or type your own" />
+          <ChoiceField label="Safe withdrawal rate" value={p.withdrawalRate} onChange={(v) => set("withdrawalRate", v)} suffix="%" step={0.1}
+                       options={[3, 3.5, 4, 4.5]} fmt={(o) => o + "%"} hint="Required capital = spending ÷ this rate" />
+          <PlanField label="Annual contribution" value={p.annualContribution} onChange={(v) => set("annualContribution", v)} prefix="$" step={1000} />
+          <PlanField label="Planning return (base)" value={p.planningReturn} onChange={(v) => set("planningReturn", v)} suffix="%" step={0.5} hint="Conservative — separate from your 60% goal" />
+          <label className="plan-field">
+            <span className="plan-field-label">Risk profile</span>
+            <select className="rd-select" value={p.riskProfile} onChange={(e) => set("riskProfile", e.target.value)}>
+              {Object.keys(PROFILE_TARGETS).map((r) => <option key={r}>{r}</option>)}
+            </select>
           </label>
+          <PlanField label="Volatile Offense — risk budget" value={p.specCap} onChange={(v) => set("specCap", v)} suffix="%" step={1} hint="The volatility you CHOOSE to carry. Profile sets a guardrail max; this is your target. Not a quality verdict — crypto is volatile, not low-quality." />
+          <PlanField label="Max drawdown tolerance" value={p.maxDrawdown} onChange={(v) => set("maxDrawdown", v)} suffix="%" step={1} />
         </div>
-        {P ? (
-          <div className="nl-pending">
-            <div className="nl-p-title">Proposed: <b>{P.ruleName}</b></div>
-            <div className="nl-p-why">{P.rationale}</div>
-            <div className="nl-kpis">
-              <Kpi l="Sharpe" b={P.base.sharpe} c={P.cand.sharpe} />
-              <Kpi l="CAGR" b={P.base.cagr} c={P.cand.cagr} dp={1} pct />
-              <Kpi l="Max DD" b={P.base.mdd} c={P.cand.mdd} dp={1} pct />
+      </section>
+
+      {/* ---------- strategic asset allocation ---------- */}
+      <section className="pm-card">
+        <div className="pm-card-head">
+          <div className="pm-card-eyebrow">Strategic asset allocation · current vs target ({p.riskProfile})</div>
+          <span className="plan-count">{view.holdings.length} positions mapped</span>
+        </div>
+        <div className="plan-buckets">
+          {BUCKETS.map((b) => {
+            const cur = bucketPct[b];
+            const [tgt, lo, hi] = targets[b];
+            const over = cur > hi + 0.5, under = cur < lo - 0.5;
+            const col = b === "Volatile Offense" ? "#d97706" : b === "Ballast" ? "#64748b" : b === "Satellite" ? "#7c3aed" : accent;
+            return (
+              <div className="plan-bucket" key={b}>
+                <div className="plan-bucket-head">
+                  <div>
+                    <div className="plan-bucket-name">{b}</div>
+                    <div className="plan-bucket-desc">{BUCKET_DESC[b]}</div>
+                  </div>
+                  <div className="plan-bucket-num">
+                    <span className="mono" style={{ color: over ? "#d97706" : "var(--ink)", fontWeight: 700 }}>{cur.toFixed(1)}%</span>
+                    <span className="plan-bucket-tgt">target {tgt}% · band {lo}–{hi}</span>
+                  </div>
+                </div>
+                <div className="plan-bar">
+                  <div className="plan-bar-band" style={{ left: `${lo}%`, width: `${hi - lo}%` }} />
+                  <div className="plan-bar-fill" style={{ width: `${Math.min(100, cur)}%`, background: col }} />
+                  <div className="plan-bar-tgt" style={{ left: `${tgt}%` }} />
+                </div>
+                {(over || under) && (
+                  <div className="plan-bucket-flag" style={{ color: over ? "#d97706" : "var(--muted)" }}>
+                    {over ? `▲ ${(cur - hi).toFixed(0)} pts over band` : `▼ ${(lo - cur).toFixed(0)} pts under band`}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* ---------- glidepath + cycle de-risk ---------- */}
+      <div className="plan-grid2">
+        <section className="pm-card">
+          <div className="pm-card-eyebrow">Glidepath posture</div>
+          <div className="plan-posture" style={{ borderColor: STATUS_COLOR[f.status] + "55" }}>
+            <div className="plan-posture-big">{basePosture}</div>
+            <div className="plan-posture-sub">{f.n} years to target · funded {f.status} → <strong>{overlay}</strong></div>
+          </div>
+          <div className="plan-glide">
+            {[[">15y", "Growth-favoring"], ["10–15y", "Mild ballast"], ["5–10y", "Moderate ballast"], ["0–5y", "Preservation"]].map(([yr, lab], i) => {
+              const ranges = [[15, 99], [10, 15], [5, 10], [0, 5]];
+              const inRange = f.n >= ranges[i][0] && (i === 0 ? true : f.n < ranges[i][1]);
+              const here = (f.n > 15 && i === 0) || (f.n >= 10 && f.n <= 15 && i === 1) || (f.n >= 5 && f.n < 10 && i === 2) || (f.n < 5 && i === 3);
+              return (
+                <div className={`plan-glide-step${here ? " here" : ""}`} key={yr} style={here ? { borderColor: accent, background: accent + "12" } : {}}>
+                  <div className="plan-glide-yr">{yr}</div>
+                  <div className="plan-glide-lab">{lab}</div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="pm-card">
+          <div className="pm-card-head">
+            <div className="pm-card-eyebrow">Cycle de-risk state</div>
+            {autoTier !== "Normal" && <span className="plan-autoflag">auto-flag: {autoTier}</span>}
+          </div>
+          <div className="plan-ladder">
+            {CYCLE_TIERS.map((t) => {
+              const active = p.cycleState === t.k;
+              return (
+                <button key={t.k} className={`plan-tier${active ? " active" : ""}`}
+                        onClick={() => set("cycleState", t.k)}
+                        style={active ? { borderColor: accent, background: accent + "10" } : {}}>
+                  <div className="plan-tier-dot" style={{ background: active ? accent : "var(--line)" }} />
+                  <div>
+                    <div className="plan-tier-name">{t.label}</div>
+                    <div className="plan-tier-note">{t.note}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="plan-tier-hint">Pre-committed — set the tier deliberately; tactical actions obey it.</div>
+        </section>
+      </div>
+
+      {/* ---------- governance ---------- */}
+      <section className="pm-card">
+        <div className="pm-card-head">
+          <div className="pm-card-eyebrow">Risk governance · visible &amp; overridable</div>
+          <span className="plan-count">learning mode A-Light · manual approval</span>
+        </div>
+        <div className="plan-gov">
+          <div className="plan-gov-mode">
+            <div className="plan-gov-label">Breach behaviour</div>
+            <div className="pm-range plan-modes">
+              {["Off", "Warn", "Confirm"].map((m) => (
+                <button key={m} className={p.govMode === m ? "is-active" : ""} onClick={() => set("govMode", m)}>{m}</button>
+              ))}
             </div>
-            <div className="nl-p-meta mono">replay: top-8 held, 2y purged walk-forward · {P.dataReal} · gates {P.checks.filter((c) => c.pass).length}/{P.checks.length}</div>
-            <div className="nl-actions">
-              <button className="nl-ok" onClick={approve}>Approve & apply</button>
-              <button className="nl-no" onClick={reject}>Reject (14d)</button>
+            <p className="plan-gov-desc">
+              {p.govMode === "Off" ? "No nudges — caps shown for reference only."
+                : p.govMode === "Warn" ? "Show a visible warning when a cap is breached. Never blocks."
+                : "Require an explicit confirmation step before a breaching action proceeds."}
+            </p>
+          </div>
+          <div className="plan-gov-accts">
+            <div className="plan-gov-label">Per-portfolio governance</div>
+            <div className="plan-acct-list">
+              {accts.map((a) => {
+                const on = p.acctGov[a.id] !== false;
+                return (
+                  <div className="plan-acct-row" key={a.id}>
+                    <div>
+                      <div className="plan-acct-name">{a.name}</div>
+                      <div className="plan-acct-label">{a.label}</div>
+                    </div>
+                    <button className={`plan-toggle${on ? " on" : ""}`} style={on ? { background: accent } : {}}
+                            onClick={() => set("acctGov", { ...p.acctGov, [a.id]: !on })}>
+                      <span /><em>{on ? "Governed" : "Off"}</em>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        ) : last ? (
-          <div className="nl-last">
-            <span className={`nl-badge ${last.verdict}`}>{last.verdict}</span>
-            <span className="nl-reason">{last.reason || last.rationale || (last.ruleName ? `"${last.ruleName}" — gates ${last.checks ? last.checks.filter((c) => c.pass).length + "/" + last.checks.length : ""}` : "")}</span>
-          </div>
-        ) : (
-          <div className="nl-last"><span className="nl-reason">First run happens ~10s after load, once per day. Bounded: one config-level rule max, replay-gated, reversible.</span></div>
-        )}
-        <div className="nl-foot">
-          <button className="nl-link" onClick={() => run(true)}>run now</button>
-          <button className="nl-link" onClick={() => setOpen(!open)}>{open ? "hide journal" : `journal (${J.runs.length})`}</button>
-          {window.HelmConfig && window.HelmConfig.activeRules().length > 0 && <span className="nl-active mono">{window.HelmConfig.activeRules().length} rule{window.HelmConfig.activeRules().length > 1 ? "s" : ""} live</span>}
         </div>
-        {open && (
-          <div className="nl-journal">
-            {J.runs.slice(0, 12).map((r, i) => (
-              <div className="nl-j-row" key={i}>
-                <span className="mono nl-j-d">{r.d.slice(5)}</span>
-                <span className={`nl-badge ${r.verdict}`}>{r.verdict}</span>
-                <span className="nl-j-t">{r.ruleName || ""} {r.reason || r.rationale || ""}</span>
+        {(p.overrides && p.overrides.length > 0) && (
+          <div className="plan-overrides">
+            <div className="plan-gov-label">Override log <span className="plan-learn">↳ feeds the learning journal</span></div>
+            {p.overrides.map((o, i) => (
+              <div className="plan-ov-row" key={i}>
+                <span className="mono">{o.date}</span>
+                <span>{o.note}</span>
+                <span className="mono plan-ov-num">spec {o.spec}% vs {o.cap}% cap</span>
               </div>
             ))}
           </div>
         )}
       </section>
-    );
-  }
 
-  const NL_CSS = `
-  .nl-card { display: flex; flex-direction: column; gap: 9px; }
-  .nl-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-  .nl-eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
-  .nl-auto { font-size: 10.5px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-  .nl-auto input { accent-color: #121820; margin: 0; }
-  .nl-pending { border: 1px solid #0e9f6e44; background: #0e9f6e08; border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 7px; }
-  .nl-p-title { font-size: 13px; }
-  .nl-p-why { font-size: 11.5px; color: var(--ink-2); line-height: 1.5; }
-  .nl-kpis { display: flex; gap: 14px; flex-wrap: wrap; }
-  .nl-kpi { display: flex; flex-direction: column; gap: 1px; font-size: 10px; color: var(--muted); }
-  .nl-kpi b { font-size: 11.5px; color: var(--ink); font-weight: 600; }
-  .nl-kpi i { font-style: normal; }
-  .nl-p-meta { font-size: 9.5px; color: var(--muted); }
-  .nl-actions { display: flex; gap: 8px; }
-  .nl-ok { font: inherit; font-size: 12px; font-weight: 700; color: #fff; background: #0e9f6e; border: 0; border-radius: 8px; padding: 6px 13px; cursor: pointer; }
-  .nl-no { font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-2); background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 13px; cursor: pointer; }
-  .nl-last { display: flex; align-items: baseline; gap: 8px; }
-  .nl-badge { font-family: var(--mono); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 99px; white-space: nowrap; flex: none; }
-  .nl-badge.no-edit, .nl-badge.skipped { background: var(--panel-2, #f4f6f8); color: var(--muted); }
-  .nl-badge.staged { background: #0e9f6e1f; color: #0e9f6e; }
-  .nl-badge.applied, .nl-badge.auto-applied { background: #0e9f6e; color: #fff; }
-  .nl-badge.rejected, .nl-badge.rejected-by-gates { background: #e024241a; color: #e02424; }
-  .nl-reason { font-size: 11.5px; color: var(--ink-2); line-height: 1.5; }
-  .nl-foot { display: flex; align-items: center; gap: 12px; }
-  .nl-link { font: inherit; font-size: 11px; font-weight: 600; color: #2563eb; background: none; border: 0; cursor: pointer; padding: 0; }
-  .nl-link:hover { text-decoration: underline; }
-  .nl-active { font-size: 9.5px; color: #0e9f6e; margin-left: auto; }
-  .nl-journal { display: flex; flex-direction: column; gap: 5px; border-top: 1px solid var(--line-2, #f0f2f5); padding-top: 8px; }
-  .nl-j-row { display: flex; align-items: baseline; gap: 7px; font-size: 11px; }
-  .nl-j-d { color: var(--muted); font-size: 9.5px; flex: none; }
-  .nl-j-t { color: var(--ink-2); line-height: 1.4; }
-  `;
-  if (!document.getElementById("helm-nl-css")) {
-    const el = document.createElement("style"); el.id = "helm-nl-css"; el.textContent = NL_CSS; document.head.appendChild(el);
-  }
+      <div className="plan-foot">
+        Strategic Layers 0–4 · paper / research only · not financial advice. Tax-loss harvest &amp; after-tax engine
+        switch on automatically if a non-registered account is added.
+      </div>
+    </div>
+  );
+}
 
-  window.HelmNightLoop = { run, approve, reject, setAutoApply, journal: load };
-  window.NightLoopCard = NightLoopCard;
+const PLAN_CSS = `
+.plan { display: flex; flex-direction: column; gap: 16px; }
+.plan-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.plan-strip { display: flex; gap: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.plan-strip-item { flex: 1; padding: 12px 18px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; }
+.plan-strip-item:last-child { border-right: 0; }
+.plan-strip-k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.plan-strip-v { font-size: 14.5px; font-weight: 600; }
+.plan-banner { display: flex; align-items: center; gap: 14px; padding: 14px 18px; border-radius: 12px; border: 1px solid; }
+.plan-banner.warn { background: #fffaf0; border-color: #f5d9a8; }
+.plan-banner.confirm { background: #fff4e6; border-color: #f0b87a; }
+.plan-banner-ico { width: 30px; height: 30px; border-radius: 8px; background: #d97706; color: #fff; display: grid; place-items: center; font-size: 13px; flex: none; }
+.plan-banner-body { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.plan-banner-body strong { font-size: 13.5px; color: #7c4a06; }
+.plan-banner-body span { font-size: 12.5px; color: #92651f; }
+.plan-banner-body em { font-style: normal; font-weight: 600; }
+.plan-banner-actions { display: flex; gap: 8px; flex: none; }
+.plan-reqret { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line-2); font-size: 12.5px; color: var(--ink-2); }
+.plan-reqret strong { font-size: 15px; }
+.plan-reqret em { font-style: normal; font-size: 11.5px; color: var(--muted); }
+.plan-trimsim { background: #fff; border: 1px solid #e6c590; border-radius: 11px; padding: 13px 16px; font-size: 12.5px; color: #7c4a06; line-height: 1.5; }
+.plan-trimsim em { font-style: normal; color: var(--muted); }
+.plan-trimsim-actions { display: flex; gap: 8px; margin-top: 10px; }
+.plan-btn { font: inherit; font-size: 12.5px; font-weight: 600; border-radius: 8px; padding: 8px 12px; cursor: pointer; border: 1px solid var(--line); }
+.plan-btn.ghost { background: #fff; color: #7c4a06; border-color: #e6c590; }
+.plan-btn.solid { color: #fff; border: 0; }
+.plan-funded { display: flex; flex-direction: column; }
+.plan-funded-legend { display: flex; justify-content: center; gap: 16px; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+.plan-funded-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; vertical-align: middle; }
+.plan-funded-note { margin-top: 12px; font-size: 12.5px; color: var(--ink-2); line-height: 1.5; }
+.plan-funded-note strong { color: var(--ink); }
+.plan-break-rows { display: flex; flex-direction: column; gap: 0; margin-top: 4px; }
+.plan-brow { display: flex; justify-content: space-between; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; color: var(--ink-2); }
+.plan-brow.total { border-bottom: 1px solid var(--line); border-top: 1px solid var(--line); margin-top: 2px; }
+.plan-brow.total span, .plan-brow.total strong { font-weight: 700; color: var(--ink); }
+.plan-gap { margin-top: 12px; font-size: 12.5px; line-height: 1.5; }
+.plan-gap strong { font-weight: 700; }
+.plan-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 18px; }
+.plan-field { display: flex; flex-direction: column; gap: 6px; }
+.plan-field-label { font-size: 12px; color: var(--ink-2); font-weight: 500; display: flex; align-items: center; gap: 5px; }
+.plan-hint { width: 14px; height: 14px; border-radius: 50%; background: var(--line); color: var(--muted); font-size: 9px; font-style: normal; display: inline-grid; place-items: center; cursor: help; }
+.plan-input { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); overflow: hidden; }
+.plan-input:focus-within { border-color: var(--accent); }
+.plan-input input { flex: 1; border: 0; background: transparent; font: inherit; font-family: var(--mono); font-size: 14px; padding: 9px 10px; width: 100%; color: var(--ink); outline: none; -moz-appearance: textfield; }
+.plan-input input::-webkit-outer-spin-button, .plan-input input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.plan-affix { padding: 0 4px 0 10px; color: var(--muted); font-size: 13px; }
+.plan-affix.r { padding: 0 10px 0 0; }
+.rd-select { border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); font: inherit; font-size: 14px; padding: 9px 10px; color: var(--ink); cursor: pointer; }
+.plan-saved, .plan-count, .plan-autoflag, .plan-learn { font-size: 11px; color: var(--muted); }
+.plan-autoflag { color: #d97706; font-weight: 600; }
+.plan-buckets { display: flex; flex-direction: column; gap: 16px; margin-top: 4px; }
+.plan-bucket-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+.plan-bucket-name { font-size: 14px; font-weight: 600; }
+.plan-bucket-desc { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+.plan-bucket-num { text-align: right; display: flex; flex-direction: column; }
+.plan-bucket-num .mono { font-size: 15px; }
+.plan-bucket-tgt { font-size: 11px; color: var(--muted); }
+.plan-bar { position: relative; height: 12px; background: var(--line-2); border-radius: 7px; overflow: hidden; }
+.plan-bar-band { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(45deg, rgba(100,116,139,.10), rgba(100,116,139,.10) 4px, transparent 4px, transparent 8px); border-left: 1px dashed rgba(100,116,139,.4); border-right: 1px dashed rgba(100,116,139,.4); }
+.plan-bar-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 7px; }
+.plan-bar-tgt { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); border-radius: 2px; }
+.plan-bucket-flag { font-size: 11.5px; margin-top: 5px; font-weight: 600; }
+.plan-posture { border: 1px solid; border-radius: 11px; padding: 14px 16px; margin-bottom: 12px; }
+.plan-posture-big { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+.plan-posture-sub { font-size: 12.5px; color: var(--ink-2); margin-top: 3px; }
+.plan-glide { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.plan-glide-step { border: 1px solid var(--line); border-radius: 9px; padding: 10px 8px; text-align: center; }
+.plan-glide-yr { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.plan-glide-step.here .plan-glide-yr { color: var(--accent); }
+.plan-glide-lab { font-size: 11.5px; font-weight: 600; margin-top: 3px; }
+.plan-ladder { display: flex; flex-direction: column; gap: 8px; }
+.plan-tier { display: flex; align-items: flex-start; gap: 11px; text-align: left; border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; background: var(--panel-2); cursor: pointer; font: inherit; transition: border-color .12s, background .12s; }
+.plan-tier:hover { border-color: var(--accent); }
+.plan-tier-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 4px; flex: none; }
+.plan-tier-name { font-size: 13.5px; font-weight: 600; }
+.plan-tier-note { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+.plan-tier-hint { font-size: 11.5px; color: var(--muted); margin-top: 10px; }
+.plan-gov { display: grid; grid-template-columns: 1fr 1.1fr; gap: 24px; }
+.plan-gov-label { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: 8px; }
+.plan-modes { display: inline-flex; }
+.plan-gov-desc { font-size: 12.5px; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.plan-acct-list { display: flex; flex-direction: column; gap: 8px; }
+.plan-acct-row { display: flex; justify-content: space-between; align-items: center; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
+.plan-acct-name { font-size: 13px; font-weight: 600; }
+.plan-acct-label { font-size: 11px; color: var(--muted); }
+.plan-toggle { display: inline-flex; align-items: center; gap: 7px; border: 0; background: var(--line); border-radius: 99px; padding: 3px 10px 3px 3px; cursor: pointer; font: inherit; }
+.plan-toggle span { width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: transform .15s; }
+.plan-toggle.on span { transform: translateX(2px); }
+.plan-toggle em { font-style: normal; font-size: 11px; font-weight: 600; color: #fff; }
+.plan-toggle:not(.on) em { color: var(--muted); }
+.plan-overrides { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.plan-ov-row { display: grid; grid-template-columns: 90px 1fr auto; gap: 12px; font-size: 12.5px; padding: 6px 0; color: var(--ink-2); }
+.plan-ov-num { color: #d97706; }
+.plan-foot { font-size: 11.5px; color: var(--muted); text-align: center; padding: 6px 0 4px; line-height: 1.5; }
+.plan-chips { display: flex; gap: 5px; margin-bottom: 6px; flex-wrap: wrap; }
+.plan-chip { font: inherit; font-size: 11.5px; font-family: var(--mono); padding: 4px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-2); cursor: pointer; }
+.plan-chip:hover { border-color: var(--accent); }
+.plan-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+@media (max-width: 1100px) { .plan-grid2, .plan-gov { grid-template-columns: 1fr; } .plan-fields { grid-template-columns: repeat(2, 1fr); } }
+`;
 
-  // schedule: give feed + modules ~10s to settle, then run (skips itself if already ran today)
-  setTimeout(() => { try { run(false); } catch (e) {} }, 10000);
-})();
+window.PlanPage = PlanPage;
+window.HelmPlan = { loadPlan, fundedCalc, bucketOf, PROFILE_TARGETS, BUCKETS, BUCKET_DESC, PLAN_KEY, PLAN_DEFAULTS, CYCLE_TIERS, STATUS_COLOR };

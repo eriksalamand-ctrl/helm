@@ -1,171 +1,185 @@
-// spine.jsx — Helm governance spine: global status strip, operating modes, decision precedence.
-// Reads the Plan state (helm.plan.v1) + live household view; everything downstream can read window.HelmState.
-const { useState: useSpineState, useEffect: useSpineEffect } = React;
+// transmission-graph.js — curated dependency graph: geopolitics → supply chain → tickers.
+// Plain JS (no Babel). Hand-checkable, versioned. Built with LLM assistance, maintained
+// quarterly. Every path ends at tickers so alerts can end at YOUR dollars.
+// Node kinds: chokepoint | country | commodity | sector-node | ticker.
+// Chokepoint fields: kw (GDELT/Finnhub headline regex), speed (how fast a shock reaches
+// prices: days | weeks | months), mode: "directional" (default) or "volatility" —
+// volatility = unforecastable actor (e.g. executive-order shocks): the graph maps WHO is
+// exposed but refuses a directional call; stance becomes sizing/stops, not buy/sell.
+// Edge: [from, to, relation, weight −1..1 (transmission strength; sign = direction)].
+// SIGN RULE (weights MULTIPLY along a path — two negatives would read as "benefits"):
+//   • an edge OUT OF a chokepoint or a price/stress node carries DIRECTION (− = the target is hurt);
+//   • an edge out of a SECTOR-HEALTH node (ca-exporters, banks-sector, defense-sector…) is pure
+//     TRANSMISSION and stays POSITIVE — members move WITH their sector, beta in the magnitude.
+// Getting this wrong silently inverts an alert (r3 fixed Taiwan→TSM and the CA tariff wall).
+window.HelmGraph = {
+  version: "2026-07 r3",
 
-const MODE_KEY = "helm.mode.v1";
-const HELM_MODES = [
-  { k: "Minimal", note: "Drawdown / stress mode — status + risk only, no new-idea noise." },
-  { k: "Standard", note: "Day-to-day — full app, governance nudges on." },
-  { k: "Full", note: "Deep-work — every panel, scores, drift, learning surfaced." },
-];
+  chokepoints: {
+    "taiwan-strait": { name: "Taiwan Strait", speed: "days", kw: /taiwan|tsmc|strait of taiwan|chinese military|pla drill/i },
+    "hormuz": { name: "Strait of Hormuz", speed: "days", kw: /hormuz|iran|persian gulf|gulf tanker|opec escort/i },
+    "suez": { name: "Suez / Red Sea", speed: "weeks", kw: /suez|red sea|houthi|bab el-mandeb/i },
+    "panama": { name: "Panama Canal", speed: "weeks", kw: /panama canal|canal drought/i },
+    "malacca": { name: "Malacca / S. China Sea", speed: "days", kw: /malacca|south china sea/i },
+    "russia-ukraine": { name: "Russia–Ukraine", speed: "days", kw: /ukraine|russia sanctions|black sea grain|nord stream/i },
+    "us-china-trade": { name: "US–China trade", speed: "days", kw: /china tariff|export control|chip ban|trade war|decoupling|entity list/i },
+    "us-fiscal": { name: "US fiscal/Fed", speed: "days", kw: /debt ceiling|government shutdown|fed chair|treasury auction|fed independence/i },
+    // ---- r2 additions ----
+    "critical-materials": { name: "Critical materials (He/Ne/Ga/REE)", speed: "months", kw: /helium|neon shortage|gallium|germanium|rare earth|critical mineral|graphite export|antimony|magnet export/i },
+    "uranium-nuclear": { name: "Uranium / nuclear", speed: "weeks", kw: /uranium|nuclear restart|enrichment|kazatomprom|small modular reactor|nuclear power deal/i },
+    "canada-us-trade": { name: "Canada–US trade", speed: "days", kw: /canada tariff|usmca|softwood lumber|aluminum tariff|steel tariff|dairy quota|buy america|canadian export/i },
+    "pharma-supply": { name: "Pharma supply / FDA", speed: "weeks", kw: /drug shortage|api shortage|pharma tariff|semaglutide|glp-1 supply|compounding|fda import|drug pricing order/i },
+    "power-grid": { name: "Power grid / AI energy", speed: "months", kw: /grid strain|transformer shortage|datacenter power|power purchase agreement|electricity price|interconnection queue/i },
+    "us-policy-shock": { name: "US policy shock (executive)", speed: "days", mode: "volatility", kw: /executive order|surprise tariff|truth social|trump (?:threatens|orders|announces|floats)|section 301|section 232|emergency powers|national security tariff/i },
+  },
 
-// Master Decision Precedence (Copilot §0) — higher wins when signals conflict.
-const PRECEDENCE = [
-  "Capital preservation & hard risk limits",
-  "Policy / IPS constraints (per-account mandate)",
-  "Funded-ratio status & glidepath posture",
-  "Cycle de-risk tier (pre-committed)",
-  "Economic regime & CIO stance",
-  "Geopolitical risk overlay",
-  "Volatile-offense risk budget",
-  "Opportunity / Route / Predictive scores",
-  "Tax location & after-tax optimisation",
-  "Tactical conviction / discretionary override (logged)",
-];
+  edges: [
+    // Taiwan Strait → semis supply chain. SIGN CONVENTION: the source edge carries direction
+    // (escalation HURTS the exposed name → negative); hub edges are transmission (same direction).
+    ["taiwan-strait", "TSM", "fab concentration", -0.9],
+    ["TSM", "NVDA", "sole leading-edge foundry", 0.8],
+    ["TSM", "AMD", "foundry", 0.8],
+    ["TSM", "AAPL", "A/M-series supply", 0.6],
+    ["TSM", "AVGO", "foundry", 0.6],
+    ["TSM", "QCOM", "foundry", 0.6],
+    ["taiwan-strait", "ASML", "litho demand shock", -0.5],
+    ["NVDA", "MSFT", "AI capex dependency", 0.4],
+    ["NVDA", "GOOGL", "AI capex dependency", 0.4],
+    ["NVDA", "AMZN", "AI capex dependency", 0.4],
+    ["NVDA", "META", "AI capex dependency", 0.4],
+    ["NVDA", "VRT", "datacenter buildout", 0.5],
+    ["NVDA", "SMCI", "server integration", 0.6],
 
-function computeHelmState() {
-  const HP = window.HelmPlan, D = window.PMData;
-  if (!HP || !D) return null;
-  const p = HP.loadPlan();
-  const view = D.buildView("all");
-  const current = view.kpis.equity;
-  const f = HP.fundedCalc(p, current);
+    // Hormuz / Iran → energy complex
+    ["hormuz", "crude-oil", "20% of global crude transits", 0.9],
+    ["crude-oil", "CNQ", "producer — benefits", 0.7],
+    ["crude-oil", "SU", "producer — benefits", 0.7],
+    ["crude-oil", "CVE", "producer — benefits", 0.7],
+    ["crude-oil", "XOM", "producer — benefits", 0.7],
+    ["crude-oil", "ENB", "volume/toll — mildly benefits", 0.4],
+    ["crude-oil", "TRP", "volume/toll — mildly benefits", 0.4],
+    ["crude-oil", "airlines-sector", "jet fuel cost", -0.6],
+    ["hormuz", "lng", "Qatar LNG transits Hormuz", 0.7],
+    ["lng", "TOU", "gas price bid — benefits", 0.5],
+    ["lng", "helium", "helium rides Qatari LNG trains", 0.6],
 
-  // household volatile-offense %
-  const sums = {}; HP.BUCKETS.forEach((b) => (sums[b] = 0));
-  view.holdings.forEach((h) => { sums[HP.bucketOf(h)] += h.dispValue; });
-  sums.Ballast += view.kpis.cash;
-  const eq = current || 1;
-  const volPct = (sums["Volatile Offense"] / eq) * 100;
-  const volOver = volPct - p.specCap;
+    // Suez / Red Sea → shipping & retail supply
+    ["suez", "shipping-rates", "reroute around Cape", 0.8],
+    ["shipping-rates", "ZIM", "container rates — benefits", 0.7],
+    ["shipping-rates", "WMT", "import cost — hurt", -0.3],
+    ["shipping-rates", "COST", "import cost — hurt", -0.3],
+    ["shipping-rates", "ATD", "goods cost — mildly hurt", -0.2],
+    ["panama", "shipping-rates", "transit caps", 0.5],
+    ["malacca", "shipping-rates", "Asia-Europe lane risk", 0.5],
+    ["malacca", "TSM", "regional escalation proxy", -0.3],
 
-  const posture = f.n > 15 ? "Growth-Favoring" : f.n >= 10 ? "Mild Ballast" : f.n >= 5 ? "Moderate Ballast" : "Preservation";
-  const regime = window.HelmRegime || null; // Phase 2 fills this
-  const drift = window.HelmDrift || null;    // Phase 4 fills this
-  return { p, view, f, volPct, volOver, posture, regime, drift, ccy: view.kpis.ccy };
-}
+    // Russia–Ukraine → energy + grains + defense + neon
+    ["russia-ukraine", "crude-oil", "supply risk", 0.5],
+    ["russia-ukraine", "nat-gas", "supply risk", 0.7],
+    ["nat-gas", "TOU", "producer — benefits", 0.6],
+    ["nat-gas", "ARX", "producer — benefits", 0.6],
+    ["russia-ukraine", "wheat", "Black Sea exports", 0.7],
+    ["wheat", "NTR", "fertilizer demand — benefits", 0.5],
+    ["wheat", "MOS", "fertilizer demand — benefits", 0.5],
+    ["russia-ukraine", "defense-sector", "defense budgets", 0.6],
+    ["defense-sector", "LMT", "order books", 0.6],
+    ["defense-sector", "RTX", "order books", 0.6],
+    ["defense-sector", "MDA", "space/defense CA", 0.5],
+    ["russia-ukraine", "semi-inputs", "Odesa/Mariupol neon (chip litho gas)", 0.5],
 
-function loadMode() { try { return localStorage.getItem(MODE_KEY) || "Standard"; } catch (e) { return "Standard"; } }
+    // US–China trade → tech + industrials + materials
+    ["us-china-trade", "NVDA", "export controls", -0.7],
+    ["us-china-trade", "AMD", "export controls", -0.6],
+    ["us-china-trade", "AAPL", "China revenue+assembly", -0.6],
+    ["us-china-trade", "TSLA", "China plant+market", -0.6],
+    ["us-china-trade", "semi-inputs", "Ga/Ge/graphite export licences", 0.8],
+    ["us-china-trade", "rare-earths", "export leverage", 0.7],
+    ["us-china-trade", "CAT", "China capex demand", -0.4],
+    ["us-china-trade", "DE", "ag exports", -0.3],
+    ["us-china-trade", "shipping-rates", "front-running tariffs", 0.4],
 
-function HelmStatusStrip({ accent, onOpenPlan }) {
-  const [, force] = useSpineState(0);
-  const [mode, setMode] = useSpineState(loadMode);
-  const [showPrec, setShowPrec] = useSpineState(false);
-  const [modeOpen, setModeOpen] = useSpineState(false);
+    // Critical materials → semi inputs, magnets, industrial gas
+    ["critical-materials", "semi-inputs", "He/Ne/Ga/Ge supply concentration", 0.8],
+    ["critical-materials", "rare-earths", "magnet/motor inputs", 0.7],
+    ["critical-materials", "helium", "He supply (US BLM sold off; Qatar/Russia concentrated)", 0.7],
+    ["semi-inputs", "TSM", "litho gas + wafer chemistry cost", -0.4],
+    ["semi-inputs", "NVDA", "upstream input risk", -0.3],
+    ["semi-inputs", "AMD", "upstream input risk", -0.3],
+    ["semi-inputs", "industrial-gas", "spot gas prices — benefits", 0.6],
+    ["helium", "industrial-gas", "He spot/contract — benefits", 0.7],
+    ["helium", "healthcare-imaging", "MRI cryogen cost — hurt", -0.3],
+    ["industrial-gas", "LIN", "largest He/Ne/Ga refiner-distributor", 0.6],
+    ["industrial-gas", "APD", "industrial gas major", 0.6],
+    ["rare-earths", "MP", "US producer — benefits", 0.7],
+    ["rare-earths", "TSLA", "motor magnets — input risk", -0.3],
 
-  useSpineEffect(() => { try { localStorage.setItem(MODE_KEY, mode); } catch (e) {} window.HelmMode = mode; }, [mode]);
-  // re-read when plan/feed changes
-  useSpineEffect(() => {
-    const h = () => force((n) => n + 1);
-    window.addEventListener("storage", h);
-    window.addEventListener("helm:feed", h);
-    const iv = setInterval(h, 30000);
-    return () => { window.removeEventListener("storage", h); window.removeEventListener("helm:feed", h); clearInterval(iv); };
-  }, []);
+    // Uranium / nuclear
+    ["uranium-nuclear", "uranium", "supply/demand repricing", 0.8],
+    ["uranium", "CCO", "CA producer — benefits", 0.7],
+    ["uranium", "NXE", "CA developer — benefits", 0.7],
+    ["uranium", "CEG", "nuclear fleet operator — benefits", 0.4],
+    ["power-grid", "CEG", "clean firm power premium", 0.6],
+    ["power-grid", "VRT", "grid/datacenter electrification", 0.6],
+    ["power-grid", "H", "regulated transmission CA", 0.3],
 
-  const s = computeHelmState();
-  if (!s) return null;
-  const SC = window.HelmPlan.STATUS_COLOR;
-  const volBreach = s.volOver > 0.5;
+    // Canada–US trade (the book is CAD-heavy — this chokepoint is personal)
+    ["canada-us-trade", "ca-exporters", "tariff wall on CA goods", -0.8],
+    ["ca-exporters", "MG", "auto parts — USMCA content", 0.6],
+    ["ca-exporters", "WFG", "softwood lumber", 0.6],
+    ["ca-exporters", "CP", "cross-border rail volumes", 0.4],
+    ["ca-exporters", "CNR", "cross-border rail volumes", 0.4],
+    ["ca-exporters", "ATD", "cross-border consumer — mild", 0.2],
+    ["canada-us-trade", "STLD", "US steel — benefits from wall", 0.4],
+    ["canada-us-trade", "NUE", "US steel — benefits from wall", 0.4],
+    ["canada-us-trade", "cad-sentiment", "CAD + TSX risk premium", -0.5],
+    ["cad-sentiment", "banks-sector", "CA macro beta", 0.3],
 
-  const items = [
-    { k: "Funded", v: s.f.status, c: SC[s.f.status], sub: (s.f.ratio * 100).toFixed(0) + "%" },
-    { k: "Posture", v: s.posture, sub: s.f.n + "y to 55" },
-    { k: "Cycle", v: (window.HelmPlan.CYCLE_TIERS.find((t) => t.k === s.p.cycleState) || {}).label || s.p.cycleState },
-    { k: "Volatile budget", v: s.volPct.toFixed(0) + "% / " + s.p.specCap + "%", c: volBreach ? "#d97706" : undefined },
-    { k: "Regime", v: s.regime ? s.regime.label : "—", sub: s.regime ? null : "Phase 2", dim: !s.regime },
-    { k: "Drift", v: s.drift ? s.drift.label : "—", sub: s.drift ? null : "Phase 4", dim: !s.drift },
-  ];
-  // Minimal mode trims to the risk-critical items
-  const shown = mode === "Minimal" ? items.filter((i) => ["Funded", "Cycle", "Volatile budget"].includes(i.k)) : items;
+    // Pharma supply / FDA — HIMS is headline-sensitive BOTH ways (compounding rules)
+    ["pharma-supply", "HIMS", "GLP-1 compounding exemption — two-sided headline risk", -0.6],
+    ["pharma-supply", "glp1-makers", "shortage resolution favors brand", 0.5],
+    ["glp1-makers", "LLY", "brand GLP-1", 0.5],
+    ["glp1-makers", "NVO", "brand GLP-1", 0.5],
+    ["pharma-supply", "generic-pharma", "API cost/shortage pass-through", 0.3],
 
-  return (
-    <div className="helm-strip">
-      <style>{SPINE_CSS}</style>
-      <div className="helm-strip-items">
-        {shown.map((i) => (
-          <button key={i.k} className={`helm-si${i.dim ? " dim" : ""}`} onClick={onOpenPlan} title="Open Plan">
-            <span className="helm-si-k">{i.k}</span>
-            <span className="helm-si-v" style={i.c ? { color: i.c } : undefined}>
-              {i.c && i.k === "Funded" ? "● " : ""}{i.v}{i.sub ? <em> · {i.sub}</em> : null}
-            </span>
-          </button>
-        ))}
-      </div>
-      <div className="helm-strip-r">
-        <button className="helm-prec" onClick={() => setShowPrec((v) => !v)} title="Decision precedence">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M3 12h12M3 18h6" strokeLinecap="round"/></svg>
-          Precedence
-        </button>
-        <div className="helm-mode-wrap">
-          <button className="helm-mode-btn" onClick={() => setModeOpen((v) => !v)}>
-            <span className="helm-mode-dot" style={{ background: accent }} />{mode}
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="m6 9 6 6 6-6" strokeLinecap="round"/></svg>
-          </button>
-          {modeOpen && (
-            <div className="helm-mode-menu" onMouseLeave={() => setModeOpen(false)}>
-              {HELM_MODES.map((m) => (
-                <button key={m.k} className={`helm-mode-item${mode === m.k ? " on" : ""}`}
-                        onClick={() => { setMode(m.k); setModeOpen(false); }}>
-                  <span className="helm-mode-name">{m.k}{mode === m.k ? " ✓" : ""}</span>
-                  <span className="helm-mode-note">{m.note}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-      {showPrec && (
-        <div className="helm-prec-pop" onMouseLeave={() => setShowPrec(false)}>
-          <div className="helm-prec-head">Master decision precedence <em>— higher wins on conflict</em></div>
-          <ol className="helm-prec-list">
-            {PRECEDENCE.map((x, i) => <li key={i}><span className="helm-prec-n">{i + 1}</span>{x}</li>)}
-          </ol>
-          <div className="helm-prec-foot">From Copilot V2.1 §0. Discretionary overrides are allowed but logged &amp; fed to the learning journal.</div>
-        </div>
-      )}
-    </div>
-  );
-}
+    // US fiscal / Fed → rates complex
+    ["us-fiscal", "rates-vol", "auction/ceiling stress", 0.7],
+    ["rates-vol", "banks-sector", "NIM + mark-to-market", -0.5],
+    ["banks-sector", "RY", "CA bank", 0.4],
+    ["banks-sector", "TD", "CA bank", 0.4],
+    ["banks-sector", "BNS", "CA bank", 0.4],
+    ["banks-sector", "BMO", "CA bank", 0.4],
+    ["banks-sector", "JPM", "US bank", 0.4],
+    ["banks-sector", "HCAL", "levered CA banks ETF", 0.6],
+    ["rates-vol", "gold", "haven bid", 0.6],
+    ["gold", "AEM", "miner — benefits", 0.7],
+    ["gold", "ABX", "miner — benefits", 0.7],
+    ["rates-vol", "BTC", "liquidity-sensitive risk asset", -0.5],
+    ["BTC", "COIN", "volumes/beta", 0.8],
+    ["BTC", "MSTR", "treasury beta", 0.9],
+    ["BTC", "IREN", "miner beta", 0.8],
+    ["BTC", "crypto-etfs", "wrapper beta", 0.9],
 
-const SPINE_CSS = `
-.helm-strip { position: relative; display: flex; align-items: stretch; justify-content: space-between; gap: 12px;
-  background: var(--surface, #fff); border-bottom: 1px solid var(--line, #e8ebef); padding: 0 22px; min-height: 42px; }
-.helm-strip-items { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; }
-.helm-si { display: flex; flex-direction: column; justify-content: center; gap: 1px; padding: 5px 16px 5px 0; margin-right: 16px;
-  border: 0; background: none; cursor: pointer; text-align: left; border-right: 1px solid var(--line, #eee); font: inherit; }
-.helm-si:hover .helm-si-v { text-decoration: underline; text-underline-offset: 2px; }
-.helm-si.dim { opacity: 0.5; }
-.helm-si-k { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted, #818b99); }
-.helm-si-v { font-size: 12.5px; font-weight: 600; color: var(--ink, #121820); }
-.helm-si-v em { font-style: normal; font-weight: 400; color: var(--muted, #818b99); }
-.helm-strip-r { display: flex; align-items: center; gap: 8px; }
-.helm-prec { display: inline-flex; align-items: center; gap: 5px; font: inherit; font-size: 11.5px; font-weight: 500; color: var(--ink-2, #475063);
-  background: none; border: 1px solid var(--line, #e8ebef); border-radius: 7px; padding: 5px 9px; cursor: pointer; }
-.helm-prec:hover { border-color: var(--muted, #aaa); }
-.helm-mode-wrap { position: relative; }
-.helm-mode-btn { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12px; font-weight: 600; color: var(--ink, #121820);
-  background: var(--panel-2, #f7f9fb); border: 1px solid var(--line, #e8ebef); border-radius: 7px; padding: 5px 10px; cursor: pointer; }
-.helm-mode-dot { width: 7px; height: 7px; border-radius: 50%; }
-.helm-mode-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 50; width: 280px; background: #fff;
-  border: 1px solid var(--line, #e8ebef); border-radius: 10px; box-shadow: 0 12px 32px rgba(15,23,42,.14); padding: 6px; }
-.helm-mode-item { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; border: 0; background: none;
-  padding: 9px 11px; border-radius: 7px; cursor: pointer; font: inherit; }
-.helm-mode-item:hover { background: var(--panel-2, #f4f6f8); }
-.helm-mode-item.on { background: color-mix(in srgb, var(--accent, #0e9f6e) 9%, #fff); }
-.helm-mode-name { font-size: 13px; font-weight: 600; color: var(--ink, #121820); }
-.helm-mode-note { font-size: 11px; color: var(--muted, #818b99); line-height: 1.35; }
-.helm-prec-pop { position: absolute; top: calc(100% + 6px); right: 22px; z-index: 50; width: 360px; background: #fff;
-  border: 1px solid var(--line, #e8ebef); border-radius: 11px; box-shadow: 0 14px 38px rgba(15,23,42,.16); padding: 14px 16px; }
-.helm-prec-head { font-size: 12.5px; font-weight: 700; color: var(--ink, #121820); margin-bottom: 9px; }
-.helm-prec-head em { font-style: normal; font-weight: 400; color: var(--muted, #818b99); }
-.helm-prec-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
-.helm-prec-list li { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--ink-2, #475063); }
-.helm-prec-n { width: 18px; height: 18px; flex: none; border-radius: 5px; background: var(--panel-2, #f0f2f5); color: var(--muted, #818b99);
-  font-family: var(--mono, monospace); font-size: 10px; font-weight: 600; display: grid; place-items: center; }
-.helm-prec-foot { margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line, #eee); font-size: 11px; color: var(--muted, #818b99); line-height: 1.5; }
-@media (max-width: 720px) { .helm-strip { flex-direction: column; align-items: flex-start; padding: 8px 16px; } }
-`;
+    // US policy shock (volatility mode: |w| = headline sensitivity, NOT direction)
+    ["us-policy-shock", "tariff-sensitive", "one post can reprice the complex", 0.7],
+    ["us-policy-shock", "canada-us-trade", "CA in the blast radius", 0.6],
+    ["us-policy-shock", "rates-vol", "Fed-independence headlines", 0.5],
+    ["us-policy-shock", "pharma-supply", "drug-pricing orders", 0.4],
+    ["us-policy-shock", "gold", "policy-uncertainty haven bid", 0.4],
+    ["tariff-sensitive", "AAPL", "China assembly", 0.6],
+    ["tariff-sensitive", "TSLA", "supply chain + subsidies", 0.6],
+    ["tariff-sensitive", "NVDA", "export-license whiplash", 0.5],
+    ["tariff-sensitive", "WMT", "import COGS", 0.4],
+    ["tariff-sensitive", "CAT", "retaliation target", 0.4],
+    ["tariff-sensitive", "MG", "USMCA content rules", 0.5],
+  ],
 
-window.HelmStatusStrip = HelmStatusStrip;
-window.computeHelmState = computeHelmState;
+  // sector-node → member tickers the book might hold (resolved at runtime too)
+  sectorMembers: {
+    "airlines-sector": ["AC.TO", "DAL", "UAL"],
+    "banks-sector": ["RY", "TD", "BNS", "BMO", "JPM", "HCAL", "MFC", "SLF"],
+    "defense-sector": ["LMT", "RTX", "MDA"],
+    "crypto-etfs": ["BTCC.B", "BTCC", "BTCC.TO", "ETHX.B", "ETHH.B", "ETHY.B", "BTCY.B", "SOLQ", "ETHA"],
+    "healthcare-imaging": ["GEHC", "SIE", "PHG"],
+    "generic-pharma": ["TEVA", "VTRS"],
+  },
+};

@@ -177,6 +177,7 @@
   // ---- Bridge panel ----
   function TransmissionAlerts({ onPick }) {
     const [, force] = React.useState(0);
+    const [mapFor, setMapFor] = React.useState(null);
     React.useEffect(() => {
       const h = () => { bustCache(); force((n) => n + 1); };
       window.addEventListener("helm:feed", h);
@@ -224,9 +225,13 @@
               ))}</div>
             )}
             <div className="tx-stance"><b>Iris</b> {a.stance}{a.it.baselineDays < 5 ? " · baseline building (" + a.it.baselineDays + "d)" : ""}</div>
-            <TxDeepData a={a} />
+            <div className="tx-actions">
+              <button className="tx-map-btn" onClick={() => setMapFor(a.id)}>⧉ flow map — see it land in the book</button>
+              <TxDeepData a={a} />
+            </div>
           </div>
         ))}
+        {mapFor && window.TxFlowMap && React.createElement(window.TxFlowMap, { alertId: mapFor, onClose: () => setMapFor(null), onPick })}
       </section>
     );
   }
@@ -262,6 +267,9 @@
   .tx-w { margin-left: auto; font-size: 10.5px; color: var(--ink-2); white-space: nowrap; }
   .tx-stance { font-size: 11.5px; color: var(--ink-2); line-height: 1.5; }
   .tx-stance b { font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: #2563eb; margin-right: 6px; }
+  .tx-actions { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .tx-map-btn { font: inherit; font-size: 11.5px; font-weight: 600; color: var(--accent, #2563eb); background: none; border: none; padding: 0; cursor: pointer; text-align: left; }
+  .tx-map-btn:hover { text-decoration: underline; }
   `;
   if (!document.getElementById("helm-tx-css")) {
     const el = document.createElement("style"); el.id = "helm-tx-css"; el.textContent = TX_CSS; document.head.appendChild(el);

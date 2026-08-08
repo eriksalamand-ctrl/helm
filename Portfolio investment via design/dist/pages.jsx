@@ -1,136 +1,229 @@
-// methods.jsx — Methodology registry: tracks each analytical "lens" (TA, regime, macro-liquidity,
-// Elliott, cycles, factor/quant, sentiment, breadth) — its current signal, hit-rate, success score,
-// and a DYNAMIC weight that follows per-regime success. Sets window.HelmMethods for the Learning loop.
-// Honest: hit-rates are seeded/simulated until the Tracker journal accrues real predicted-vs-realized history.
-const { useState: useMethState } = React;
+// pages.jsx — Holdings full page + Research stock detail
+const { useState: useStateP } = React;
 
-const mUP = "#0e9f6e", mDN = "#e02424", mWARN = "#d97706";
+const pUP = "#0e9f6e", pDOWN = "#e02424";
+const pSc = (n) => (n >= 0 ? pUP : pDOWN);
+const pPct = (n, dp = 2) => `${n >= 0 ? "+" : ""}${n.toFixed(dp)}%`;
+const pAbs = (n, ccy) => `${n >= 0 ? "+" : "−"}$${Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 })}${ccy ? " " + ccy : ""}`;
+const pMoney = (n, dp = 0) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+const acctNameOf = (id) => (window.PMData.accounts.find((a) => a.id === id) || {}).name || id;
 
-// each method: deterministic current read + a seeded track record (hit-rate overall + per regime family)
-// regime families: TR (trending/risk-on), CH (chop/neutral), RO (risk-off/defensive)
-const METHODS = [
-  { k: "Regime / Markov", short: "Regime", desc: "Growth×inflation state, transition odds", base: 0.62, byReg: { TR: 0.68, CH: 0.55, RO: 0.66 }, horizon: "Weeks–months" },
-  { k: "Macro liquidity", short: "Liquidity", desc: "Global M2 / net liquidity (Raoul Pal lens)", base: 0.58, byReg: { TR: 0.66, CH: 0.50, RO: 0.61 }, horizon: "8–12 wks lead" },
-  { k: "Factor / quant", short: "Factor", desc: "Value · momentum · quality composite", base: 0.60, byReg: { TR: 0.64, CH: 0.57, RO: 0.52 }, horizon: "Months" },
-  { k: "Technical (TA)", short: "TA", desc: "RSI · moving averages · trend gate", base: 0.55, byReg: { TR: 0.63, CH: 0.46, RO: 0.51 }, horizon: "Days–weeks" },
-  { k: "Market cycles", short: "Cycles", desc: "4-yr cycle · seasonality · halving", base: 0.52, byReg: { TR: 0.56, CH: 0.50, RO: 0.49 }, horizon: "Months–years" },
-  { k: "Elliott wave", short: "Elliott", desc: "Impulse/corrective wave count", base: 0.47, byReg: { TR: 0.52, CH: 0.43, RO: 0.45 }, horizon: "Swing" },
-  { k: "Sentiment / news", short: "Sentiment", desc: "GDELT geopolitics · news tone", base: 0.50, byReg: { TR: 0.48, CH: 0.49, RO: 0.58 }, horizon: "Days" },
-  { k: "Breadth / flows", short: "Breadth", desc: "Advance-decline · concentration (added)", base: 0.54, byReg: { TR: 0.60, CH: 0.51, RO: 0.55 }, horizon: "Weeks" },
-];
+// ============================================================ Holdings page
+function HoldingsPage({ view, accountId, accent, onPick }) {
+  const [sort, setSort] = useStateP({ key: "dispValue", dir: -1 });
+  const [q, setQ] = useStateP("");
+  const showAcct = accountId === "all";
+  const cols = [
+    { key: "ticker", label: "Symbol", align: "left" },
+    ...(showAcct ? [{ key: "acct", label: "Account", align: "left" }] : []),
+    { key: "price", label: "Last", align: "right" },
+    { key: "dayPct", label: "Day", align: "right" },
+    { key: "spark", label: "30D", align: "center", noSort: true },
+    { key: "shares", label: "Qty", align: "right" },
+    { key: "avgCost", label: "Avg cost", align: "right" },
+    { key: "dispValue", label: "Mkt value", align: "right" },
+    { key: "plAbs", label: "Unreal. P/L", align: "right" },
+    { key: "annualIncome", label: "Income/yr", align: "right" },
+    { key: "weight", label: "Weight", align: "right" },
+  ];
+  let rows = view.holdings.filter((h) => !q || h.ticker.toLowerCase().includes(q.toLowerCase()) || h.name.toLowerCase().includes(q.toLowerCase()));
+  rows = [...rows].sort((a, b) => (a[sort.key] > b[sort.key] ? 1 : -1) * sort.dir);
+  const setCol = (key) => setSort((s) => (s.key === key ? { key, dir: -s.dir } : { key, dir: -1 }));
 
-// map the live regime label → family bucket
-function regimeFamily() {
-  const r = window.HelmRegime;
-  if (!r) return "CH";
-  if (/Goldilocks|Reflation|Disinflation/.test(r.label)) return "TR";
-  if (/Stagflation|Deflation|Slowdown/.test(r.label)) return "RO";
-  return "CH";
-}
-
-// each method's current directional read (deterministic from available signals)
-function methodSignal(m) {
-  const r = window.HelmRegime;
-  const fam = regimeFamily();
-  const bias = r ? r.bias : "Neutral";
-  const riskOn = /Risk-on|Constructive/.test(bias), riskOff = /Risk-off|Defensive/.test(bias);
-  switch (m.short) {
-    case "Regime": return riskOn ? "Bullish" : riskOff ? "Bearish" : "Neutral";
-    case "Liquidity": { const live = window.HelmFeed && window.HelmFeed.macro; return (live ? 1 : 1) && fam !== "RO" ? "Bullish" : "Neutral"; }
-    case "Factor": return riskOn ? "Bullish" : "Neutral";
-    case "TA": return fam === "TR" ? "Bullish" : fam === "RO" ? "Bearish" : "Neutral";
-    case "Cycles": return "Neutral";
-    case "Elliott": return fam === "TR" ? "Bullish" : "Neutral";
-    case "Sentiment": { const geo = r ? r.geoScore : 0; return geo >= 55 ? "Bearish" : "Neutral"; }
-    case "Breadth": return fam === "TR" ? "Bullish" : fam === "RO" ? "Bearish" : "Neutral";
-    default: return "Neutral";
-  }
-}
-
-// dynamic weight = per-regime success, normalized across methods, floored so nothing dies entirely
-function methodWeights(fam) {
-  const raw = METHODS.map((m) => Math.max(0.05, m.byReg[fam] - 0.45)); // success above coin-flip-ish floor
-  const sum = raw.reduce((a, b) => a + b, 0) || 1;
-  return METHODS.map((m, i) => ({ m, w: raw[i] / sum }));
-}
-
-function MethodRegistry({ accent, compact }) {
-  const [sortBy, setSortBy] = useMethState("weight");
-  const fam = regimeFamily();
-  const famLabel = { TR: "Trending / risk-on", CH: "Chop / neutral", RO: "Risk-off / defensive" }[fam];
-  const weighted = methodWeights(fam);
-
-  // publish blended directional read for the spine / strategy lab
-  const blended = weighted.reduce((acc, { m, w }) => {
-    const s = methodSignal(m); return acc + w * (s === "Bullish" ? 1 : s === "Bearish" ? -1 : 0);
-  }, 0);
-  window.HelmMethods = { fam, blended, weights: weighted.map(({ m, w }) => ({ k: m.short, w })) };
-
-  let rows = weighted.map(({ m, w }) => ({ m, w, sig: methodSignal(m), score: Math.round(m.byReg[fam] * 100), overall: Math.round(m.base * 100) }));
-  rows.sort((a, b) => sortBy === "weight" ? b.w - a.w : sortBy === "score" ? b.score - a.score : a.m.k.localeCompare(b.m.k));
-
-  const sigCol = (s) => s === "Bullish" ? mUP : s === "Bearish" ? mDN : "var(--muted)";
+  const K = view.kpis;
+  const totalIncome = view.holdings.reduce((s, h) => s + (h.annualIncome || 0), 0);
+  const winners = view.holdings.filter((h) => h.plAbs >= 0).length;
 
   return (
-    <section className="pm-card mth">
-      <style>{METHODS_CSS}</style>
-      <div className="pm-card-head">
-        <div>
-          <div className="pm-card-eyebrow">Methodology registry · {METHODS.length} lenses</div>
-          <div className="mth-sub">Each lens is scored, and its weight follows success <strong>in the current regime</strong> — now <strong style={{ color: accent }}>{famLabel}</strong>. Blended read:
-            <span style={{ color: blended > 0.1 ? mUP : blended < -0.1 ? mDN : "var(--muted)", fontWeight: 700 }}> {blended > 0.1 ? "Bullish" : blended < -0.1 ? "Bearish" : "Neutral"} ({blended >= 0 ? "+" : ""}{(blended * 100).toFixed(0)})</span>
+    <div className="hp">
+      <div className="hp-summary">
+        <div className="hp-sum-item"><span>Positions</span><strong>{view.holdings.length}</strong></div>
+        <div className="hp-sum-item"><span>Invested</span><strong>{pMoney(K.totalCost)}</strong></div>
+        <div className="hp-sum-item"><span>Market value</span><strong>{pMoney(K.totalValue)}</strong></div>
+        <div className="hp-sum-item"><span>Unrealized P/L</span><strong style={{ color: pSc(K.totalPlAbs) }}>{pAbs(K.totalPlAbs)} <em>{pPct(K.totalPlPct, 1)}</em></strong></div>
+        <div className="hp-sum-item"><span>Est. income/yr</span><strong>{pMoney(totalIncome)}</strong></div>
+        <div className="hp-sum-item"><span>Winners</span><strong>{winners}/{view.holdings.length}</strong></div>
+      </div>
+
+      <section className="pm-card">
+        <div className="pm-card-head">
+          <div className="pm-card-eyebrow">All positions</div>
+          <div className="hp-search">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2" strokeLinecap="round"/></svg>
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter positions…" />
           </div>
         </div>
-        {!compact && <div className="mth-sort">
-          <button className={sortBy === "weight" ? "on" : ""} onClick={() => setSortBy("weight")}>Weight</button>
-          <button className={sortBy === "score" ? "on" : ""} onClick={() => setSortBy("score")}>Score</button>
-          <button className={sortBy === "name" ? "on" : ""} onClick={() => setSortBy("name")}>Name</button>
-        </div>}
-      </div>
-      <div className="mth-list">
-        <div className="mth-rowh">
-          <span>Method</span><span>Current read</span><span className="ta-r">Regime score</span><span className="ta-r">Overall</span><span>Dynamic weight</span>
+        <div className="pm-table-wrap">
+          <table className="pm-table">
+            <thead><tr>
+              {cols.map((c) => (
+                <th key={c.key} className={`ta-${c.align}${c.noSort ? "" : " sortable"}${sort.key === c.key ? " sorted" : ""}`}
+                    onClick={c.noSort ? undefined : () => setCol(c.key)}>
+                  {c.label}{sort.key === c.key ? (sort.dir < 0 ? " ↓" : " ↑") : ""}
+                </th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {rows.map((h) => (
+                <tr key={h.ticker + h.acct} className="hp-row" onClick={() => onPick(h.ticker)}>
+                  <td className="ta-left">
+                    <div className="pm-sym">
+                      <div className="pm-sym-badge" style={{ background: accent + "1a", color: accent }}>{h.ticker.slice(0, 2)}</div>
+                      <div><div className="pm-sym-tkr">{h.ticker}</div><div className="pm-sym-name">{h.name}</div></div>
+                    </div>
+                  </td>
+                  {showAcct && <td className="ta-left"><span className="hp-acct-tag">{acctNameOf(h.acct)}</span></td>}
+                  <td className="ta-right mono">{pMoney(h.price, 2)}</td>
+                  <td className="ta-right mono" style={{ color: pSc(h.dayPct) }}>{pPct(h.dayPct)}</td>
+                  <td className="ta-center"><div className="pm-spk"><Sparkline points={h.spark} color={pSc(h.plPct)} /></div></td>
+                  <td className="ta-right mono">{h.shares.toLocaleString("en-US")}</td>
+                  <td className="ta-right mono">{pMoney(h.avgCost, 2)}</td>
+                  <td className="ta-right mono">{pMoney(h.dispValue)}</td>
+                  <td className="ta-right mono">
+                    <div style={{ color: pSc(h.plPct) }}>{pPct(h.plPct)}</div>
+                    <div className="pm-cell-sub" style={{ color: pSc(h.plAbs) }}>{pAbs(h.plAbs)}</div>
+                  </td>
+                  <td className="ta-right mono">{h.annualIncome ? pMoney(h.annualIncome) : "—"}</td>
+                  <td className="ta-right mono">
+                    <div className="pm-weight"><span>{h.weight.toFixed(1)}%</span>
+                      <span className="pm-weight-bar"><i style={{ width: `${Math.min(100, h.weight * 3)}%`, background: accent }} /></span></div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-        {rows.map(({ m, w, sig, score, overall }) => (
-          <div className="mth-row" key={m.k}>
-            <div className="mth-k"><strong>{m.k}</strong><span>{m.desc} · {m.horizon}</span></div>
-            <div className="mth-sig" style={{ color: sigCol(sig) }}>● {sig}</div>
-            <div className="ta-r mth-score" style={{ color: score >= 60 ? mUP : score >= 50 ? mWARN : mDN }}>{score}%</div>
-            <div className="ta-r mth-overall">{overall}%</div>
-            <div className="mth-w"><div className="mth-w-bar"><i style={{ width: (w * 100 * 2.2) + "%", background: accent }} /></div><span>{(w * 100).toFixed(0)}%</span></div>
-          </div>
-        ))}
-      </div>
-      <div className="mth-foot">Weights are per-regime &amp; dynamic: a lens that wins in trends but fails in chop is down-weighted when the regime turns. <strong>Simulated track record</strong> until the Tracker journal has real predicted-vs-realized history — then these scores update from the reflexion ledger.</div>
-    </section>
+      </section>
+    </div>
   );
 }
 
-const METHODS_CSS = `
-.mth-sub { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
-.mth-sub strong { color: var(--ink); }
-.mth-sort { display: inline-flex; gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.mth-sort button { font: inherit; font-size: 11.5px; padding: 5px 11px; border: 0; background: var(--panel-2); color: var(--ink-2); cursor: pointer; border-right: 1px solid var(--line); }
-.mth-sort button:last-child { border-right: 0; }
-.mth-sort button.on { background: var(--ink); color: #fff; }
-.mth-list { margin-top: 6px; }
-.mth-rowh, .mth-row { display: grid; grid-template-columns: 2.3fr 1.1fr 0.9fr 0.7fr 1.6fr; gap: 14px; align-items: center; }
-.mth-rowh { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding: 6px 0; border-bottom: 1px solid var(--line); }
-.mth-row { padding: 11px 0; border-bottom: 1px solid var(--line-2); }
-.ta-r { text-align: right; }
-.mth-k strong { font-size: 13.5px; display: block; }
-.mth-k span { font-size: 11px; color: var(--muted); }
-.mth-sig { font-size: 12.5px; font-weight: 600; }
-.mth-score { font-family: var(--mono); font-size: 13px; font-weight: 600; }
-.mth-overall { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-.mth-w { display: flex; align-items: center; gap: 9px; }
-.mth-w-bar { flex: 1; height: 8px; background: var(--line-2); border-radius: 5px; overflow: hidden; }
-.mth-w-bar i { display: block; height: 100%; border-radius: 5px; }
-.mth-w span { font-family: var(--mono); font-size: 12px; font-weight: 600; min-width: 30px; text-align: right; }
-.mth-foot { font-size: 11.5px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
-.mth-foot strong { color: var(--ink-2); }
-@media (max-width: 860px) { .mth-rowh { display: none; } .mth-row { grid-template-columns: 1fr 1fr; gap: 6px 14px; } }
-`;
+// ============================================================ Research detail
+const RANGES_R = [{ k: "1M", d: 21 }, { k: "3M", d: 63 }, { k: "6M", d: 126 }, { k: "1Y", d: 252 }, { k: "5Y", d: 1260 }];
 
-window.MethodRegistry = MethodRegistry;
-window.helmRegimeFamily = regimeFamily;
+function newsFor(ticker, name, sec) {
+  const pool = {
+    Crypto: [["Spot inflows accelerate as institutions add exposure", "2h"], ["Network upgrade roadmap reaffirmed by core team", "1d"], ["Volatility elevated ahead of macro print", "2d"]],
+    Semiconductors: [["AI accelerator demand keeps order book full into next year", "3h"], ["Foundry capacity expansion announced", "1d"], ["Analysts lift price target on datacenter strength", "2d"]],
+    Energy: [["Production guidance raised on stronger output", "5h"], ["Dividend increase declared for the quarter", "1d"], ["Commodity prices firm on supply tightness", "3d"]],
+  };
+  const generic = [[`${name} reaffirms full-year outlook`, "4h"], [`Quarterly results beat on margin expansion`, "1d"], [`Coverage initiated with constructive view`, "2d"], [`Sector rotation lifts ${sec} names`, "3d"]];
+  return (pool[sec] || generic).slice(0, 4);
+}
+
+function ResearchPage({ ticker, accent, onPick, onBack }) {
+  const [range, setRange] = useStateP("1Y");
+  const D = window.PMData;
+  const holds = D.allHoldings.filter((h) => h.ticker === ticker);
+  const wl = D.watchlist.find((w) => w.ticker === ticker);
+  const base = holds[0] || wl;
+  if (!base) return <div className="pm-empty">No data for {ticker}.</div>;
+
+  const name = base.name, sec = base.sector || "—", ccy = base.ccy || "USD";
+  const price = base.price, dayPct = base.dayPct;
+  const days = RANGES_R.find((r) => r.k === range).d;
+  const totalRet = (holds[0] ? holds[0].plPct : 18) / 100;
+  const hist = D.priceHistory(base.seed * 7 + 3, days, price, Math.min(2.5, Math.max(-0.6, totalRet)), 0.014);
+  const lo = Math.min(...hist), hi = Math.max(...hist);
+
+  // aggregate position across accounts
+  const totShares = holds.reduce((s, h) => s + h.shares, 0);
+  const totMV = holds.reduce((s, h) => s + h.marketValue, 0);
+  const totCost = holds.reduce((s, h) => s + h.costBasis, 0);
+  const plAbs = totMV - totCost, plPct = totCost ? (plAbs / totCost) * 100 : 0;
+  const avgCost = totShares ? totCost / totShares : 0;
+  const held = holds.length > 0;
+
+  const stats = [
+    ["Day range", `${pMoney(price * (1 - Math.abs(dayPct) / 100 - 0.004), 2)} – ${pMoney(price * (1 + 0.004), 2)}`],
+    [`${range} range`, `${pMoney(lo, 2)} – ${pMoney(hi, 2)}`],
+    ["Sector", sec],
+    ["Currency", ccy],
+    ["Div yield", base.divYield ? base.divYield.toFixed(1) + "%" : "—"],
+    ["Beta (est.)", (0.7 + (base.seed % 9) / 10).toFixed(2)],
+  ];
+  const news = newsFor(ticker, name, sec);
+
+  return (
+    <div className="rp">
+      <button className="rp-back" onClick={onBack}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+        Back
+      </button>
+
+      <div className="rp-grid">
+        <section className="pm-card rp-main">
+          <div className="rp-head">
+            <div className="pm-sym">
+              <div className="pm-sym-badge lg" style={{ background: accent + "1a", color: accent }}>{ticker.slice(0, 2)}</div>
+              <div>
+                <div className="rp-tkr">{ticker} <span className="rp-ccy">{ccy}</span></div>
+                <div className="rp-name">{name}</div>
+              </div>
+            </div>
+            <div className="rp-px">
+              <div className="rp-px-val">{pMoney(price, 2)}</div>
+              <div className="rp-px-ch" style={{ color: pSc(dayPct) }}>{pPct(dayPct)} today</div>
+            </div>
+          </div>
+          <div className="rp-range">
+            {RANGES_R.map((r) => (
+              <button key={r.k} className={range === r.k ? "is-active" : ""} onClick={() => setRange(r.k)}>{r.k}</button>
+            ))}
+          </div>
+          <div className="rp-chart"><AreaChart data={hist} accent={dayPct >= 0 ? accent : pDOWN} showBenchmark={false} height={300} /></div>
+          <div className="rp-stats">
+            {stats.map(([k, v]) => (<div className="rp-stat" key={k}><span>{k}</span><strong>{v}</strong></div>))}
+          </div>
+        </section>
+
+        <div className="rp-rail">
+          <section className="pm-card">
+            <div className="pm-card-eyebrow">Your position</div>
+            {held ? (
+              <div className="rp-pos">
+                <div className="rp-pos-big" style={{ color: pSc(plAbs) }}>{pAbs(plAbs, ccy)}</div>
+                <div className="rp-pos-sub" style={{ color: pSc(plPct) }}>{pPct(plPct)} unrealized</div>
+                <div className="rp-pos-grid">
+                  <div><span>Shares</span><strong>{totShares.toLocaleString("en-US")}</strong></div>
+                  <div><span>Avg cost</span><strong>{pMoney(avgCost, 2)}</strong></div>
+                  <div><span>Market value</span><strong>{pMoney(totMV)}</strong></div>
+                  <div><span>Cost basis</span><strong>{pMoney(totCost)}</strong></div>
+                </div>
+                {holds.length > 1 && (
+                  <div className="rp-pos-accts">
+                    {holds.map((h) => (<div key={h.acct}><span>{acctNameOf(h.acct)}</span><strong>{h.shares} sh</strong></div>))}
+                  </div>
+                )}
+                <div className="rp-pos-actions">
+                  <button className="pm-btn-primary" style={{ flex: 1 }}>Buy</button>
+                  <button className="rp-sell" style={{ flex: 1 }}>Sell</button>
+                </div>
+              </div>
+            ) : (
+              <div className="rp-nopos">
+                <p>Not held. On your watchlist.</p>
+                <button className="pm-btn-primary">+ Add trade</button>
+              </div>
+            )}
+          </section>
+
+          <section className="pm-card">
+            <div className="pm-card-eyebrow">News</div>
+            <div className="rp-news">
+              {news.map(([h, t], i) => (
+                <a className="rp-news-item" key={i}>
+                  <div className="rp-news-h">{h}</div>
+                  <div className="rp-news-t">{sec} · {t} ago</div>
+                </a>
+              ))}
+            </div>
+          </section>
+        </div>
+      </div>
+      <ChartAnalysis series={hist} ticker={ticker} name={name} sector={sec} accent={accent} />
+    </div>
+  );
+}
+
+Object.assign(window, { HoldingsPage, ResearchPage });

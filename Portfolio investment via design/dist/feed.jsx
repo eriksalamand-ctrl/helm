@@ -1,80 +1,65 @@
-// engineconfig.js — the applied-edits layer (Phase 1b: close the Learning-Lab loop).
-//
-// Until now every learning surface was one-way: Learning Lab could ACCEPT a candidate
-// rule and "promote" a version, but promotion only wrote a registry row — the live
-// signalsFor() never changed. This is the missing write path: a persistent, reversible
-// override the engine actually reads. An approved candidate calls HelmConfig.apply(...),
-// signalsFor() merges it, and every surface (Screener, Tracker, Cockpit, Papersim) runs
-// the edited engine. Nothing is applied without an explicit click, and Reset restores
-// the baseline instantly. This is A-Light: harness-level config edits only — never a
-// model retrain, never a broker order.
+// feed.jsx — front-end live-feed adapter. Fetches the JSON snapshots and patches PMData.
+// No-op (mock mode) when HELM_FEED_BASE / HELM_QUOTES_BASE are empty.
 (function () {
-  const KEY = "helm_engine_overrides_v1";
+  const trim = (u) => (u || "").replace(/\/$/, "");
+  const feedBase = () => trim(window.HELM_FEED_BASE);
+  const quotesBase = () => trim(window.HELM_QUOTES_BASE) || feedBase();
 
-  const EMPTY = { weights: null, bars: null, rules: [], meta: null };
-
-  function load() {
+  async function getJSON(base, name) {
+    if (!base) return null;
     try {
-      const o = JSON.parse(localStorage.getItem(KEY) || "null");
-      if (!o || typeof o !== "object") return { ...EMPTY };
-      return { weights: o.weights || null, bars: o.bars || null,
-               rules: Array.isArray(o.rules) ? o.rules : [], meta: o.meta || null };
-    } catch (e) { return { ...EMPTY }; }
-  }
-  function persist(o) { try { localStorage.setItem(KEY, JSON.stringify(o)); } catch (e) {} }
-
-  let state = load();
-
-  function notify() {
-    try { window.dispatchEvent(new Event("helm:config")); } catch (e) {}
+      // cache-bust in 60s buckets: raw.githubusercontent has a ~5-min CDN edge cache that
+      // { cache: "no-store" } does NOT bypass, so a fresh daily commit wouldn't show for
+      // minutes. A 60s-bucketed query param forces a fresh origin pull at most once/min.
+      const bust = (name.indexOf("?") >= 0 ? "&" : "?") + "v=" + Math.floor(Date.now() / 60000);
+      const r = await fetch(base + "/" + name + bust, { cache: "no-store" });
+      return r.ok ? await r.json() : null;
+    } catch (e) { return null; }
   }
 
-  const HelmConfig = {
-    // current overrides (may be empty)
-    get() { return state; },
-    // is the live engine running anything other than baseline?
-    isActive() { return !!(state.weights || state.bars || (state.rules && state.rules.length)); },
+  window.HelmFeed = {
+    status: { live: false, source: "mock", asOf: null },
 
-    // merge overrides onto a preset cfg — called by strategy.jsx presetCfg()
-    applyTo(cfg) {
-      if (!cfg) return cfg;
-      const out = { ...cfg };
-      if (state.weights) out.weights = { ...cfg.weights, ...state.weights };
-      if (state.bars) Object.keys(state.bars).forEach((k) => { if (state.bars[k] != null) out[k] = state.bars[k]; });
-      return out;
+    async init(onUpdate) {
+      this._onUpdate = onUpdate;
+      if (!feedBase() && !quotesBase()) { this.status = { live: false, source: "mock", asOf: null }; return; }
+      const [quotes, prices, fx, macro, news, fundamentals] = await Promise.all([
+        getJSON(quotesBase(), "quotes.json"),
+        getJSON(feedBase(), "prices.json"),
+        getJSON(feedBase(), "fx.json"),
+        getJSON(feedBase(), "macro.json"),
+        getJSON(feedBase(), "news.json"),
+        getJSON(feedBase(), "fundamentals.json"),
+      ]);
+      this.macro = macro || null;
+      this.news = news || null;
+      this.fundamentals = fundamentals || null;
+      this.prices = prices || null;
+      const res = window.PMData.applyLive({ quotes, prices, fx }) || {};
+      this.status = res.live
+        ? { live: true, source: "feed", partial: !!res.partial, touched: res.touched,
+            asOf: (quotes && quotes._updatedAt) || (fx && fx.asOf) || null,
+            marketOpen: quotes ? quotes._marketOpen : undefined }
+        : { live: false, source: "mock", asOf: null };
+      if (res.live && onUpdate) onUpdate();
+      if (res.live) window.dispatchEvent(new CustomEvent("helm:feed")); // cache-busting signal for Pulse/Sigma/Transmission/Bridge
+      // fast-lane polling every 60s while a quotes base is configured
+      if (quotesBase()) {
+        clearInterval(this._timer);
+        this._timer = setInterval(() => this.refresh(), 60000);
+      }
     },
-    // the accepted candidate-rule ids the engine should post-apply (resolved at call time
-    // against window.HelmCandidateRules, which learninglab.jsx publishes)
-    activeRules() { return state.rules || []; },
 
-    // apply an approved edit. patch = { weights?, bars?, rules?, meta:{source,version,label,note} }
-    apply(patch) {
-      if (!patch) return;
-      const next = {
-        weights: patch.weights !== undefined ? patch.weights : state.weights,
-        bars: patch.bars !== undefined ? patch.bars : state.bars,
-        rules: patch.rules !== undefined ? patch.rules : state.rules,
-        meta: { ...(patch.meta || {}), date: new Date().toISOString().slice(0, 10), ts: Date.now() },
-      };
-      state = next; persist(next); notify();
-      // append to an applied-edits ledger (audit trail, separate from the live override)
-      try {
-        const L = JSON.parse(localStorage.getItem("helm_engine_edits_log_v1") || "[]");
-        L.unshift({ action: "apply", ...next.meta, weights: next.weights, bars: next.bars, rules: next.rules });
-        localStorage.setItem("helm_engine_edits_log_v1", JSON.stringify(L.slice(0, 50)));
-      } catch (e) {}
-      return next;
+    async refresh() {
+      const quotes = await getJSON(quotesBase(), "quotes.json");
+      if (!quotes) return;
+      const res = window.PMData.applyLive({ quotes }) || {};
+      if (res.live) {
+        this.status = { ...this.status, live: true, source: "feed", touched: res.touched,
+                        asOf: quotes._updatedAt || this.status.asOf, marketOpen: quotes._marketOpen };
+        if (this._onUpdate) this._onUpdate();
+        window.dispatchEvent(new CustomEvent("helm:feed"));
+      }
     },
-    reset(note) {
-      state = { ...EMPTY }; persist(state); notify();
-      try {
-        const L = JSON.parse(localStorage.getItem("helm_engine_edits_log_v1") || "[]");
-        L.unshift({ action: "reset", date: new Date().toISOString().slice(0, 10), ts: Date.now(), note: note || "reverted to baseline" });
-        localStorage.setItem("helm_engine_edits_log_v1", JSON.stringify(L.slice(0, 50)));
-      } catch (e) {}
-    },
-    log() { try { return JSON.parse(localStorage.getItem("helm_engine_edits_log_v1") || "[]"); } catch (e) { return []; } },
   };
-
-  window.HelmConfig = HelmConfig;
 })();
