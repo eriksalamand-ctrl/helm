@@ -123,7 +123,27 @@ function ResearchPage({ ticker, accent, onPick, onBack }) {
   const price = base.price, dayPct = base.dayPct;
   const days = RANGES_R.find((r) => r.k === range).d;
   const totalRet = (holds[0] ? holds[0].plPct : 18) / 100;
-  const hist = D.priceHistory(base.seed * 7 + 3, days, price, Math.min(2.5, Math.max(-0.6, totalRet)), 0.014);
+  // REAL daily closes from the feed when available (with their real dates); synthetic only as a
+  // labelled fallback. Crypto history on the free CoinGecko tier is capped at ~1y — say so rather
+  // than stretch a fake 5y line (SOL "5Y" used to show an invented curve with no dates).
+  const calDays = { "1M": 31, "3M": 92, "6M": 183, "1Y": 366, "5Y": 1827 }[range];
+  const P = window.HelmFeed && window.HelmFeed.prices;
+  const rawS = P && (P[ticker] || P[ticker + ".TO"]);
+  const realAll = Array.isArray(rawS) ? rawS.filter((o) => o && o.c != null && o.d) : null;
+  let hist, dates, realNote = null, isReal = false;
+  if (realAll && realAll.length > 5) {
+    const cut = Date.now() - calDays * 864e5;
+    let sl = realAll.filter((o) => new Date(o.d + "T00:00:00Z").getTime() >= cut);
+    if (sl.length < 5) sl = realAll.slice(-5);
+    hist = sl.map((o) => o.c);
+    dates = sl.map((o) => new Date(o.d + "T12:00:00Z"));
+    isReal = true;
+    const firstD = new Date(realAll[0].d + "T00:00:00Z").getTime();
+    if (firstD > cut + 20 * 864e5) realNote = `real history only available since ${new Date(realAll[0].d + "T12:00:00Z").toLocaleDateString("en-CA", { month: "short", year: "numeric" })}`;
+  } else {
+    hist = D.priceHistory(base.seed * 7 + 3, days, price, Math.min(2.5, Math.max(-0.6, totalRet)), 0.014);
+    dates = hist.map((_, i) => { const d = new Date(); d.setDate(d.getDate() - Math.round((hist.length - 1 - i) * 1.4484)); return d; });
+  }
   const lo = Math.min(...hist), hi = Math.max(...hist);
 
   // aggregate position across accounts
@@ -171,7 +191,8 @@ function ResearchPage({ ticker, accent, onPick, onBack }) {
               <button key={r.k} className={range === r.k ? "is-active" : ""} onClick={() => setRange(r.k)}>{r.k}</button>
             ))}
           </div>
-          <div className="rp-chart"><AreaChart data={hist} accent={dayPct >= 0 ? accent : pDOWN} showBenchmark={false} height={300} /></div>
+          <div className="rp-src mono" style={{ fontSize: 10.5, color: isReal ? "var(--muted)" : "#b45309", margin: "2px 0 4px" }}>{isReal ? `● real daily closes · ${dates[0].toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" })} → ${dates[dates.length - 1].toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" })}${realNote ? " · " + realNote : ""}` : "⚠ simulated history — this ticker is not in the price feed yet"}</div>
+          <div className="rp-chart"><AreaChart data={hist} dates={dates} accent={dayPct >= 0 ? accent : pDOWN} showBenchmark={false} height={300} /></div>
           <div className="rp-stats">
             {stats.map(([k, v]) => (<div className="rp-stat" key={k}><span>{k}</span><strong>{v}</strong></div>))}
           </div>
