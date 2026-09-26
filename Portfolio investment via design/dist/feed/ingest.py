@@ -249,8 +249,8 @@ def finnhub_fund_symbol(base):
     return base.upper()
 
 
-def yahoo_history(symbol):
-    """Returns list of {d, c, v} ascending, or []."""
+def yahoo_history(symbol, keep=None):
+    """Returns list of {d, c, v} ascending, or []. keep = max points (default HIST_DAYS)."""
     url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}"
            f"?range=5y&interval=1d")
     j = get_json(url)
@@ -266,7 +266,7 @@ def yahoo_history(symbol):
                 continue
             out.append({"d": datetime.utcfromtimestamp(t).strftime("%Y-%m-%d"),
                         "c": round(float(c), 4), "v": float(vols[i] or 0)})
-        return out[-HIST_DAYS:]
+        return out[-(keep or HIST_DAYS):]
     except Exception:
         return []
 
@@ -736,6 +736,28 @@ def main():
     resolve_crypto_ids([p["ticker"] for p in positions if p["exchange"] == "CRYPTO"])
     c_quotes, c_prices = coingecko()
     quotes.update(c_quotes)
+    # CoinGecko's keyless tier caps history at 365 days. Yahoo carries the big coins as
+    # SYM-USD back 5y+, so we splice: Yahoo for the older years, CoinGecko wherever it has
+    # the date (fresher, and it's what the live quote comes from). Crypto trades 7 days a
+    # week, so 5y = ~1826 points, not the 1260 trading days used for stocks.
+    YF_CRYPTO = {"SUI": "SUI20947-USD", "TAO": "TAO22974-USD", "APT": "APT21794-USD",
+                 "NEAR": "NEAR-USD", "RENDER": "RENDER-USD"}
+    for sym in sorted(set(CRYPTO.values())):
+        cg = c_prices.get(sym) or []
+        yh = yahoo_history(YF_CRYPTO.get(sym, f"{sym}-USD"), keep=1830)
+        time.sleep(0.4)
+        if not yh:
+            print(f"  crypto 5y: {sym} not on Yahoo — keeping {len(cg)}d CoinGecko history")
+            continue
+        # sanity: same coin? (many coins share a ticker) — last closes must agree within 15%
+        if cg and abs(yh[-1]["c"] / cg[-1]["c"] - 1) > 0.15:
+            print(f"  crypto 5y: {sym} Yahoo price {yh[-1]['c']} vs CoinGecko {cg[-1]['c']} — mismatch, skipped")
+            continue
+        merged = {o["d"]: {"d": o["d"], "c": o["c"]} for o in yh}
+        for o in cg:
+            merged[o["d"]] = {"d": o["d"], "c": o["c"]}
+        c_prices[sym] = [merged[d] for d in sorted(merged)][-1830:]
+        print(f"  crypto 5y: {sym} {len(cg)}d -> {len(c_prices[sym])}d (since {c_prices[sym][0]['d']})")
     prices.update(c_prices)
 
     # ---- Finnhub fundamentals + news: held positions + universe EQUITIES only ----
