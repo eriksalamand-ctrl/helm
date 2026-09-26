@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -54,23 +55,48 @@ FRED_SERIES = {
 }
 
 # ---- Global M2 (Raoul Pal lens) components -------------------------------
-# Sum of the 5 major money-supply blocs, each converted to USD. China's M2 has no
-# maintained FRED series (MYAGM2CNM189N ended 2017) — we use the OECD broad-money
-# (M3) series for the others, monthly, and scale by FX. Honest proxy, ~85% of the
-# usual "global M2" aggregate; the front-end cares about the IMPULSE (6-mo change),
-# which this captures.
-GLOBAL_M2_PARTS = {
-    # series id            (key,     ccy,   fx series id, fx orientation)
-    "M2SL":              ("us",   "USD", None,       None),      # US M2, $B
-    "MABMM301EZM189S":   ("ez",   "EUR", "DEXUSEU", "mult"),    # euro area broad money, €
-    "MABMM301JPM189S":   ("jp",   "JPY", "DEXJPUS", "div"),     # Japan, ¥
-    "MABMM301GBM189S":   ("uk",   "GBP", "DEXUSUK", "mult"),    # UK, £
-    "MABMM301CAM189S":   ("ca",   "CAD", "DEXCAUS", "div"),     # Canada, C$
+# The IMF/IFS MYAGM2* and several OECD MABMM* series on FRED are STALE (the euro-area
+# M2 series stops in 2017; our old aggregate silently ended 2023-10 because a strict
+# month-intersection let the deadest part truncate everything). So: probe a CANDIDATE
+# LIST per bloc, keep the first that returns FRESH data, drop the ones that don't, and
+# report coverage instead of pretending. If only the US survives, the front-end says so.
+M2_STALE_DAYS = 200  # a monthly series older than this is dead, not lagging
+GLOBAL_M2_CANDIDATES = {
+    # bloc: [(series id, ccy, fx series id, fx orientation), … tried in order]
+    "us": [("M2SL", "USD", None, None), ("WM2NS", "USD", None, None)],
+    "ez": [("MABMM301EZM189S", "EUR", "DEXUSEU", "mult"), ("MYAGM2EZM196N", "EUR", "DEXUSEU", "mult")],
+    "jp": [("MABMM301JPM189S", "JPY", "DEXJPUS", "div"), ("MYAGM2JPM189S", "JPY", "DEXJPUS", "div")],
+    "uk": [("MABMM301GBM189S", "GBP", "DEXUSUK", "mult"), ("MYAGM2GBM196N", "GBP", "DEXUSUK", "mult")],
+    "ca": [("MABMM301CAM189S", "CAD", "DEXCAUS", "div"), ("MYAGM2CAM196N", "CAD", "DEXCAUS", "div")],
+    "cn": [("MABMM301CNM189S", "CNY", "DEXCHUS", "div"), ("MYAGM2CNM189N", "CNY", "DEXCHUS", "div")],
 }
 
 # crypto: coingecko id -> friendly symbol
 CRYPTO = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL", "ripple": "XRP",
-          "litecoin": "LTC", "near": "NEAR", "cosmos": "ATOM", "aptos": "APT"}
+          "litecoin": "LTC", "near": "NEAR", "cosmos": "ATOM", "aptos": "APT",
+          # held in the Crypto Direct account (Sep 2026)
+          "chainlink": "LINK", "sui": "SUI", "ondo-finance": "ONDO", "tron": "TRX",
+          "bittensor": "TAO", "render-token": "RENDER", "dogecoin": "DOGE"}
+
+
+# AUTO-ADD: any positions.csv row with exchange=CRYPTO whose symbol isn't mapped above is
+# resolved via CoinGecko's /search (exact symbol match, highest market-cap rank wins), so a
+# new coin only needs a CSV row — no code edit. Ambiguous tickers (many coins share a symbol)
+# are why the curated map above stays first: it pins the ones we know.
+def resolve_crypto_ids(symbols):
+    known = {v: k for k, v in CRYPTO.items()}
+    for sym in sorted(set(symbols)):
+        if sym in known:
+            continue
+        j = get_json(f"https://api.coingecko.com/api/v3/search?query={urllib.parse.quote(sym)}")
+        time.sleep(6)  # keyless free tier
+        coins = [c for c in ((j or {}).get("coins") or []) if (c.get("symbol") or "").upper() == sym]
+        coins.sort(key=lambda c: c.get("market_cap_rank") or 10**9)
+        if coins:
+            CRYPTO[coins[0]["id"]] = sym
+            print(f"  crypto auto-add: {sym} -> {coins[0]['id']} (rank {coins[0].get('market_cap_rank')})")
+        else:
+            print(f"  crypto auto-add: {sym} not found on CoinGecko — skipped")
 
 # index benchmarks (Stooq symbols)
 BENCHMARKS = {"^spx": "SPX", "^ndq": "NDX", "^tsx": "TSX"}
@@ -172,7 +198,7 @@ def now_iso():
 # ---- positions (the one manual input — NBDB CSV export) -------------------
 def load_positions():
     """positions.csv columns: account,ticker,exchange,qty,avg_cost,ccy
-    exchange is US or TSX (drives the Stooq symbol suffix)."""
+    exchange is US, TSX, or CRYPTO (CRYPTO rows are priced via CoinGecko, auto-resolved)."""
     rows = []
     if not os.path.exists(POSITIONS):
         print("  ! positions.csv not found — using benchmarks only", file=sys.stderr)
@@ -214,9 +240,10 @@ def finnhub_symbol(ticker, exchange):
 # Company fundamentals are listing-agnostic, and Finnhub's FREE tier does not resolve
 # ".TO" tickers — but most large Canadian names are ALSO US-listed under the bare
 # ticker (ENB, RY, TD, BNS, BMO, CNQ, SU, MFC, SLF, NTR...), which DOES return real
-# fundamentals. Canada-only names (CSU, MDA, WSP, HPS-A, GIB-A...) won't resolve on
-# the free tier and correctly fall back to the front-end's honest hash proxy. So for
-# fundamentals + company news we ALWAYS use the bare ticker, never the ".TO" form.
+# fundamentals. Canada-only names (CSU, MDA, WSP, HPS-A, GIB-A...) don't resolve here
+# at all — they now get a second pass through yahoo_fundamentals() before falling back
+# to the front-end's honest hash proxy. So for Finnhub fundamentals + company news we
+# ALWAYS use the bare ticker, never the ".TO" form.
 # (This fixes a regression where adding ".TO" made EVERY Canadian name return nothing.)
 def finnhub_fund_symbol(base):
     return base.upper()
@@ -376,42 +403,84 @@ def fred_all():
         net.append({"d": d, "v": round(val / 1000.0, 1)})  # millions → billions
     macro["net_liquidity"] = net[-260:]
 
-    # ---- Global M2 in USD (monthly; see GLOBAL_M2_PARTS note) ----
+    # ---- Global M2 in USD (monthly; see GLOBAL_M2_CANDIDATES note) ----
     try:
-        parts, fx_cache = {}, {}
-        for sid, (key, ccy, fx_sid, orient) in GLOBAL_M2_PARTS.items():
-            s = fred_series(sid, limit=200)
-            time.sleep(0.3)
-            if not s:
-                continue
-            if fx_sid:
-                if fx_sid not in fx_cache:
-                    fx_cache[fx_sid] = fred_series(fx_sid, limit=4000)
-                    time.sleep(0.3)
-                fxs = fx_cache[fx_sid]
-                if not fxs:
+        from datetime import date as _date
+        today = _date.today()
+
+        def _age_days(iso):
+            try:
+                y, m, d = (int(x) for x in iso[:10].split("-"))
+                return (today - _date(y, m, d)).days
+            except Exception:
+                return 9999
+
+        parts, fx_cache, chosen, dropped = {}, {}, {}, {}
+        for bloc, cands in GLOBAL_M2_CANDIDATES.items():
+            for sid, ccy, fx_sid, orient in cands:
+                s = fred_series(sid, limit=200)
+                time.sleep(0.3)
+                if not s:
+                    dropped[bloc] = dropped.get(bloc, "") + f"{sid}:empty "
                     continue
-                fx_by_month = {}
-                for o in fxs:  # last daily obs per month
-                    fx_by_month[o["d"][:7]] = o["v"]
-                conv = []
-                for o in s:
-                    r = fx_by_month.get(o["d"][:7])
-                    if not r:
+                age = _age_days(s[-1]["d"])
+                if age > M2_STALE_DAYS:
+                    dropped[bloc] = dropped.get(bloc, "") + f"{sid}:stale({s[-1]['d']}) "
+                    continue  # dead series — try the next candidate
+                if fx_sid:
+                    if fx_sid not in fx_cache:
+                        fx_cache[fx_sid] = fred_series(fx_sid, limit=4000)
+                        time.sleep(0.3)
+                    fxs = fx_cache[fx_sid]
+                    if not fxs:
+                        dropped[bloc] = dropped.get(bloc, "") + f"{sid}:nofx "
                         continue
-                    v = o["v"] * r if orient == "mult" else o["v"] / r
-                    conv.append({"d": o["d"], "v": v})
-                s = conv
-            # OECD MABMM301 series are national-currency LEVELS (not billions) —
-            # normalize everything to $B like M2SL (which is already $B)
-            if sid != "M2SL" and s and s[-1]["v"] > 1e6:
-                s = [{"d": o["d"], "v": o["v"] / 1e9} for o in s]
-            parts[key] = {o["d"][:7]: o["v"] for o in s}
-        if "us" in parts and len(parts) >= 3:
-            months = sorted(set.intersection(*[set(p) for p in parts.values()]))
-            gm2 = [{"d": m + "-01", "v": round(sum(p[m] for p in parts.values()), 1)} for m in months]
+                    fx_by_month = {}
+                    for o in fxs:  # last daily obs per month
+                        fx_by_month[o["d"][:7]] = o["v"]
+                    conv = []
+                    for o in s:
+                        r = fx_by_month.get(o["d"][:7])
+                        if not r:
+                            continue
+                        conv.append({"d": o["d"], "v": o["v"] * r if orient == "mult" else o["v"] / r})
+                    s = conv
+                    if not s:
+                        continue
+                # national-currency LEVELS → normalize to $B like M2SL (already $B)
+                if s and abs(s[-1]["v"]) > 1e6:
+                    s = [{"d": o["d"], "v": o["v"] / 1e9} for o in s]
+                parts[bloc] = {o["d"][:7]: o["v"] for o in s}
+                chosen[bloc] = {"series": sid, "asof": s[-1]["d"], "age_days": age}
+                break
+            if bloc not in parts:
+                print(f"  global_m2: {bloc} unavailable — {dropped.get(bloc, 'no candidate')}")
+
+        if "us" in parts:
+            # union of months, not intersection: a bloc that reports late no longer truncates
+            # the whole series. A month counts only if every INCLUDED bloc has it (or can be
+            # carried ≤2 months — M2 is a slow stock, not a price).
+            all_months = sorted(set().union(*[set(p) for p in parts.values()]))
+            gm2 = []
+            for m in all_months:
+                total, cover = 0.0, 0
+                for bloc, p in parts.items():
+                    if m in p:
+                        total += p[m]
+                        cover += 1
+                    else:  # carry forward at most 2 months
+                        prev = [k for k in p if k < m]
+                        if prev and (int(m[:4]) * 12 + int(m[5:7])) - (int(max(prev)[:4]) * 12 + int(max(prev)[5:7])) <= 2:
+                            total += p[max(prev)]
+                            cover += 1
+                if cover == len(parts):
+                    gm2.append({"d": m + "-01", "v": round(total, 1)})
             macro["global_m2"] = gm2[-84:]  # ~7y monthly, values in $B
             macro["global_m2_parts"] = sorted(parts.keys())
+            macro["global_m2_sources"] = chosen
+            macro["global_m2_asof"] = gm2[-1]["d"] if gm2 else None
+            macro["global_m2_coverage"] = f"{len(parts)}/{len(GLOBAL_M2_CANDIDATES)} blocs: {', '.join(sorted(parts))}"
+            print(f"  global_m2: {macro['global_m2_coverage']} · asof {macro['global_m2_asof']}")
     except Exception as e:
         print("  global_m2 failed:", e)
 
@@ -468,6 +537,89 @@ def finnhub_fundamentals(pairs):
             }
         time.sleep(1.1)  # 60/min free limit
     return out
+
+
+# ---- Yahoo fundamentals fallback: the Canada-ONLY names Finnhub's free tier can't see ----
+# Finnhub covers dual-listed CA names via their US listing (ENB, RY, TD…), but names that
+# trade only on the TSX (CSU, MDA, WSP, HPS-A) return nothing — those used to fall back to
+# the honest hash proxy, i.e. a made-up quality score. Yahoo's quoteSummary DOES cover them,
+# but has required a cookie+crumb handshake since 2023, so we do that once and reuse it.
+# Best-effort by design: any failure leaves the name on the hash proxy, exactly as before.
+_YF_CRUMB = {"crumb": None, "cookie": None, "tried": False}
+
+
+def _yahoo_crumb():
+    if _YF_CRUMB["tried"]:
+        return _YF_CRUMB["crumb"], _YF_CRUMB["cookie"]
+    _YF_CRUMB["tried"] = True
+    try:
+        req = urllib.request.Request("https://fc.yahoo.com/", headers=UA)
+        cookie = None
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                cookie = r.headers.get("Set-Cookie")
+        except urllib.error.HTTPError as e:      # 404 still sets the cookie
+            cookie = e.headers.get("Set-Cookie")
+        if not cookie:
+            return None, None
+        cookie = cookie.split(";")[0]
+        h = dict(UA)
+        h["Cookie"] = cookie
+        raw = get("https://query1.finance.yahoo.com/v1/test/getcrumb", headers=h)
+        crumb = raw.decode("utf-8").strip() if raw else None
+        if crumb and len(crumb) < 40 and "<" not in crumb:
+            _YF_CRUMB["crumb"], _YF_CRUMB["cookie"] = crumb, cookie
+    except Exception as e:
+        print("  yahoo crumb failed:", e)
+    return _YF_CRUMB["crumb"], _YF_CRUMB["cookie"]
+
+
+def yahoo_fundamentals(symbol):
+    """symbol is the Yahoo form (CSU.TO). Returns the same dict shape as finnhub_fundamentals."""
+    crumb, cookie = _yahoo_crumb()
+    if not crumb:
+        return None
+    h = dict(UA)
+    h["Cookie"] = cookie
+    url = (f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{urllib.parse.quote(symbol)}"
+           f"?modules=defaultKeyStatistics,financialData,summaryDetail"
+           f"&crumb={urllib.parse.quote(crumb)}")
+    j = get_json(url, headers=h)
+    try:
+        res = j["quoteSummary"]["result"][0]
+    except Exception:
+        return None
+    ks, fd, sd = res.get("defaultKeyStatistics", {}), res.get("financialData", {}), res.get("summaryDetail", {})
+
+    def raw(d, k, scale=1.0):
+        v = (d or {}).get(k)
+        if isinstance(v, dict):
+            v = v.get("raw")
+        try:
+            return round(float(v) * scale, 4)
+        except (TypeError, ValueError):
+            return None
+
+    out = {
+        "pe": raw(sd, "trailingPE") or raw(ks, "forwardPE"),
+        "beta": raw(ks, "beta"),
+        "divYield": raw(sd, "dividendYield", 100.0),
+        "high52": raw(sd, "fiftyTwoWeekHigh"),
+        "low52": raw(sd, "fiftyTwoWeekLow"),
+        "pb": raw(ks, "priceToBook"),
+        "ps": raw(sd, "priceToSalesTrailing12Months"),
+        "roe": raw(fd, "returnOnEquity", 100.0),
+        "roa": raw(fd, "returnOnAssets", 100.0),
+        "netMargin": raw(fd, "profitMargins", 100.0),
+        "grossMargin": raw(fd, "grossMargins", 100.0),
+        "operMargin": raw(fd, "operatingMargins", 100.0),
+        "revGrowth": raw(fd, "revenueGrowth", 100.0),
+        "epsGrowth": raw(fd, "earningsGrowth", 100.0),
+        "debtToEquity": raw(fd, "debtToEquity"),
+        "currentRatio": raw(fd, "currentRatio"),
+        "src": "yahoo",
+    }
+    return out if any(v is not None for k, v in out.items() if k != "src") else None
 
 
 def finnhub_news(pairs, per=3):
@@ -540,7 +692,7 @@ def main():
     # ---- prices + quotes (Yahoo/Stooq) for held positions ----
     exch_of = {}  # ticker -> "US"/"TSX", for the Finnhub symbol pass below
     for p in positions:
-        if p["ticker"] in seen:
+        if p["ticker"] in seen or p["exchange"] == "CRYPTO":  # coins go through CoinGecko below
             continue
         seen.add(p["ticker"])
         exch_of[p["ticker"]] = p["exchange"]
@@ -581,6 +733,7 @@ def main():
         time.sleep(0.4)
 
     # ---- crypto ----
+    resolve_crypto_ids([p["ticker"] for p in positions if p["exchange"] == "CRYPTO"])
     c_quotes, c_prices = coingecko()
     quotes.update(c_quotes)
     prices.update(c_prices)
@@ -600,6 +753,21 @@ def main():
     fx = fx_usdcad()
     macro = fred_all()
     fundamentals = finnhub_fundamentals(fund_pairs)
+    # Canada-only names Finnhub's free tier can't see (no US listing) — try Yahoo before
+    # letting them fall back to the front-end's honest hash proxy. Held names first; capped
+    # so a bad day at Yahoo can't stretch the job.
+    ca_missing = [k for (k, _sym) in fund_pairs if k.endswith(".TO") and not fundamentals.get(k)]
+    ca_missing.sort(key=lambda k: 0 if k in set(holdings_tickers) else 1)
+    if ca_missing:
+        print(f"  finnhub missed {len(ca_missing)} CA-only names — trying Yahoo fundamentals")
+        got = 0
+        for k in ca_missing[:60]:
+            y = yahoo_fundamentals(yahoo_symbol(k.replace(".TO", ""), "TO"))
+            if y:
+                fundamentals[k] = y
+                got += 1
+            time.sleep(0.6)
+        print(f"  yahoo fundamentals: {got}/{min(len(ca_missing), 60)} resolved")
     # news: held positions only (universe-wide news adds ~3 more minutes of Finnhub
     # calls for names you don't own yet — lower value than the fundamentals that
     # actually drive scoring, so scope it to what you hold + geopolitical/macro).
