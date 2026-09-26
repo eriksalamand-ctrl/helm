@@ -44,7 +44,7 @@ function fundamentals(h) {
   const ticker = (h && h.ticker) || h;
   const fb = { quality: clamp(34 + hashStr(ticker + "·q") * 58, 0, 100), valuation: clamp(30 + hashStr(ticker + "·v") * 58, 0, 100), real: false };
   const F = window.HelmFeed && window.HelmFeed.fundamentals;
-  const r = F && F[ticker];
+  const r = F && (F[ticker] || F[ticker + ".TO"]); // feed keys CA names with .TO
   if (!r) return fb;
   // REAL valuation from P/E (lower = cheaper = higher score) + 52-week range position
   let valuation = fb.valuation;
@@ -81,14 +81,22 @@ function momentum(points) {
 }
 
 // ---- the model ----
-// session memo (10-min expiry): σ-band z per ticker for the policy gates — entryRead is O(series)
+// session memo for the σ-band policy gate (entryRead is O(series), the scanners call it per row).
+// TWO traps this has already fallen into: (1) memoizing a null during load-order warm-up killed the
+// gate for 10 minutes; (2) worse — before the 13 MB prices.json lands, entryRead returns a real
+// NUMBER computed on a synthetic series, which passes any "!= null" guard and poisons the cache with
+// pre-feed values. So: only a z derived from a REAL series is cacheable, and the cache is keyed on
+// the feed's as-of stamp so it busts the moment live data arrives (same pattern as odds.jsx).
 const helmZMemo = {};
+const helmFeedStamp = () => { const f = window.HelmFeed; return (f && (f.asOf || f.stamp || (f.status && f.status.asOf))) || (f && f.prices ? "px" : "none"); };
 function helmPolicyZ(t) {
-  if (!window.HelmSigma) return null; // pre-sigma call (load order) — do NOT memoize the miss
+  if (!window.HelmSigma) return null; // pre-sigma call (load order) — do NOT memoize
+  const stamp = helmFeedStamp();
   const m = helmZMemo[t];
-  if (m && Date.now() - m.at < 600000) return m.z;
-  let z = null; try { const e = window.HelmSigma.entryRead(t); z = e && e.z != null ? e.z : null; } catch (e) {}
-  if (z != null) helmZMemo[t] = { z, at: Date.now() }; // never memoize a miss — series may not have arrived yet
+  if (m && m.stamp === stamp && Date.now() - m.at < 600000) return m.z;
+  let z = null, real = false;
+  try { const e = window.HelmSigma.entryRead(t); if (e && e.z != null) { z = e.z; real = !!e.real; } } catch (e) {}
+  if (z != null && real) helmZMemo[t] = { z, at: Date.now(), stamp }; // synthetic reads are never cached
   return z;
 }
 
@@ -208,6 +216,16 @@ function signalsFor(h, cfg) {
     const z = helmPolicyZ(h.ticker);
     if (z != null && z <= -2 && !(longTerm && out.qualReal && out.qualityScore >= 60)) { out.action = "Hold"; out.gateZ = z; }
     else if (z != null && z >= 2) { out.action = "Hold"; out.gateZ = z; }
+  }
+  // EVIDENCE GATE (the Chief's G1, now engine-wide): a Buy must rest on something REAL —
+  // either real quality fundamentals, or a real price history with at least one trend
+  // (200d secular or 20d weekly) pointing up. A hash-proxy score on a synthetic series is
+  // not a reason to buy (EDSA: fake quality 85 + synthetic prices + both trends down → was "Buy").
+  if (!cfg.__raw && out.action === "Buy" && !(h.sector === "Crypto" || h.market === "Crypto") && !out.qualReal) {
+    let priceReal = false, trendUp = false;
+    try { const s = window.HelmSigma && window.HelmSigma.seriesFor(h.ticker); priceReal = !!(s && s.real); } catch (e) {}
+    if (priceReal) { try { const t2 = window.HelmOdds && window.HelmOdds.trend2(h.ticker); trendUp = !!(t2 && ((t2.secular && t2.secular.up) || (t2.weekly && t2.weekly.up))); } catch (e) {} }
+    if (!(priceReal && trendUp)) { out.action = "Hold"; out.gateData = priceReal ? "no real fundamentals · both trends down" : "insufficient data — no real fundamentals or price history"; }
   }
   return out;
 }
@@ -384,6 +402,29 @@ function StrategyLab({ accent, account }) {
   const acctNm = (id) => { const a = D.accounts.find((x) => x.id === id); return a ? a.name : "—"; };
   const slFx = D.getFx ? D.getFx() : 1.4174;
   const slDispCcy = D.getDispCcy ? D.getDispCcy() : "CAD";
+  // proposition dates: first day each ticker+side was proposed, persisted so a standing call keeps
+  // its original date (and you can see how long it has been on the board). Pruned after 45 days unseen.
+  const slPropDates = (() => {
+    const K = "helm_sl_prop_dates_v1", today = new Date().toISOString().slice(0, 10);
+    let m = {}; try { m = JSON.parse(localStorage.getItem(K) || "{}"); } catch (e) {}
+    return { m, K, today };
+  })();
+  const slPropDate = (t, kind) => {
+    const k = t + "|" + kind, P = slPropDates;
+    if (!P.m[k]) P.m[k] = { first: P.today, seen: P.today }; else P.m[k].seen = P.today;
+    return new Date(P.m[k].first + "T12:00:00").toLocaleDateString("en-CA", { month: "short", day: "numeric", year: P.m[k].first.slice(0, 4) !== P.today.slice(0, 4) ? "numeric" : undefined });
+  };
+  React.useEffect(() => {
+    const P = slPropDates, cut = Date.now() - 45 * 864e5;
+    Object.keys(P.m).forEach((k) => { if (new Date(P.m[k].seen).getTime() < cut) delete P.m[k]; });
+    try { localStorage.setItem(P.K, JSON.stringify(P.m)); } catch (e) {}
+  });
+  const slPxAsOf = () => {
+    const F = window.HelmFeed, st = F && F.status;
+    const d = (st && (st.asOf || st.quotesAsOf || st.pricesAsOf)) || (F && F.asOf);
+    const dt = d ? new Date(d) : new Date();
+    return (isNaN(dt) ? new Date() : dt).toLocaleDateString("en-CA", { month: "short", day: "numeric" }) + (F && F.live ? " live" : st && st.mode === "close" ? " close" : "");
+  };
   const sharesFor = (amount, h) => {
     const px = h.price || 0; if (!px) return 0;
     const native = (h.ccy === slDispCcy || !h.ccy) ? amount : (h.ccy === "USD" ? amount / slFx : amount * slFx);
@@ -481,6 +522,8 @@ function StrategyLab({ accent, account }) {
                   {(() => { const th = tradeHorizon(h.sig); return <span className={`sl-horizon sl-hz-${th.kind}`} title={th.note}>{th.tag}</span>; })()}
                 </div>
                 <div className="sl-trade-nums">
+                  <div className="sl-trade-px" title={`Price used for this proposition · ${slPxAsOf()}`}>@ {h.ccy || "CAD"} {(h.price || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}{typeof h.dayPct === "number" ? <span style={{ color: h.dayPct >= 0 ? sUP : sDOWN }}> {h.dayPct >= 0 ? "+" : "−"}{Math.abs(h.dayPct).toFixed(1)}%</span> : null}</div>
+                  <div className="sl-trade-date" title="Date this proposition first appeared (persisted) · price date">proposed {slPropDate(h.ticker, h._kind)} · px {slPxAsOf()}</div>
                   <div className="sl-trade-size">{h._kind === "buy" ? sMoney(h.alloc) : sMoney(h.dispValue * (h.sig.sellFrac || 0.33))} <span className="sl-trade-sh">· {sharesFor(h._kind === "buy" ? h.alloc : h.dispValue * (h.sig.sellFrac || 0.33), h).toLocaleString("en-US")} sh</span></div>
                   <div className="sl-trade-acct">{h._kind === "buy"
                     ? (h._held && h.acct ? "add in " + acctNm(h.acct) : "→ " + routeAcct(h))
@@ -630,7 +673,7 @@ function StrategyLab({ accent, account }) {
   );
 }
 
-window.__helmStrategyRev = "gate-v4"; // σ-gate + no-miss-memo
+window.__helmStrategyRev = "gate-v5"; // σ-gate + real-only, feed-stamped memo
 window.StrategyLab = StrategyLab;
 window.signalsFor = signalsFor;
 window.helmTradeHorizon = tradeHorizon;

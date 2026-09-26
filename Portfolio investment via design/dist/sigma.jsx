@@ -11,7 +11,7 @@
   // ---- raw close series for any ticker (real feed EOD if present, else synthetic) ----
   function seriesFor(ticker, n = 252) {
     const P = window.HelmFeed && window.HelmFeed.prices;
-    const s = P && P[ticker];
+    const s = P && (P[ticker] || P[ticker + ".TO"]); // CA holdings are keyed "BNS" in data.jsx but "BNS.TO" in the feed
     if (Array.isArray(s) && s.length > 40) {
       return { arr: s.slice(-n).map((r) => r.c != null ? r.c : r), real: true };
     }
