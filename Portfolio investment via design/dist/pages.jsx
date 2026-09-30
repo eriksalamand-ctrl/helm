@@ -141,10 +141,9 @@ function ResearchPage({ ticker, accent, onPick, onBack }) {
     const firstD = new Date(realAll[0].d + "T00:00:00Z").getTime();
     if (firstD > cut + 20 * 864e5) realNote = `real history only available since ${new Date(realAll[0].d + "T12:00:00Z").toLocaleDateString("en-CA", { month: "short", year: "numeric" })}`;
   } else {
-    hist = D.priceHistory(base.seed * 7 + 3, days, price, Math.min(2.5, Math.max(-0.6, totalRet)), 0.014);
-    dates = hist.map((_, i) => { const d = new Date(); d.setDate(d.getDate() - Math.round((hist.length - 1 - i) * 1.4484)); return d; });
+    hist = null; dates = null; // no real history → no chart (never an invented curve)
   }
-  const lo = Math.min(...hist), hi = Math.max(...hist);
+  const lo = hist ? Math.min(...hist) : price, hi = hist ? Math.max(...hist) : price;
 
   // aggregate position across accounts
   const totShares = holds.reduce((s, h) => s + h.shares, 0);
@@ -156,7 +155,7 @@ function ResearchPage({ ticker, accent, onPick, onBack }) {
 
   const stats = [
     ["Day range", `${pMoney(price * (1 - Math.abs(dayPct) / 100 - 0.004), 2)} – ${pMoney(price * (1 + 0.004), 2)}`],
-    [`${range} range`, `${pMoney(lo, 2)} – ${pMoney(hi, 2)}`],
+    [`${range} range`, hist ? `${pMoney(lo, 2)} – ${pMoney(hi, 2)}` : "missing data"],
     ["Sector", sec],
     ["Currency", ccy],
     ["Div yield", base.divYield ? base.divYield.toFixed(1) + "%" : "—"],
@@ -191,8 +190,15 @@ function ResearchPage({ ticker, accent, onPick, onBack }) {
               <button key={r.k} className={range === r.k ? "is-active" : ""} onClick={() => setRange(r.k)}>{r.k}</button>
             ))}
           </div>
-          <div className="rp-src mono" style={{ fontSize: 10.5, color: isReal ? "var(--muted)" : "#b45309", margin: "2px 0 4px" }}>{isReal ? `● real daily closes · ${dates[0].toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" })} → ${dates[dates.length - 1].toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" })}${realNote ? " · " + realNote : ""}` : "⚠ simulated history — this ticker is not in the price feed yet"}</div>
-          <div className="rp-chart"><AreaChart data={hist} dates={dates} accent={dayPct >= 0 ? accent : pDOWN} showBenchmark={false} height={300} /></div>
+          {isReal ? (<>
+            <div className="rp-src mono" style={{ fontSize: 10.5, color: "var(--muted)", margin: "2px 0 4px" }}>● real daily closes · {dates[0].toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" })} → {dates[dates.length - 1].toLocaleDateString("en-CA", { month: "short", day: "numeric", year: "numeric" })}{realNote ? " · " + realNote : ""}</div>
+            <div className="rp-chart"><AreaChart data={hist} dates={dates} accent={dayPct >= 0 ? accent : pDOWN} showBenchmark={false} height={300} /></div>
+          </>) : (
+            <div style={{ height: 300, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, border: "1px dashed var(--line, #e2e5e9)", borderRadius: 10, margin: "8px 0" }}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>Missing data</div>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", maxWidth: 380, textAlign: "center", lineHeight: 1.5 }}>{ticker} has no real price history in the feed yet — no chart is shown rather than an invented one.</div>
+            </div>
+          )}
           <div className="rp-stats">
             {stats.map(([k, v]) => (<div className="rp-stat" key={k}><span>{k}</span><strong>{v}</strong></div>))}
           </div>
@@ -242,7 +248,7 @@ function ResearchPage({ ticker, accent, onPick, onBack }) {
           </section>
         </div>
       </div>
-      <ChartAnalysis series={hist} ticker={ticker} name={name} sector={sec} accent={accent} />
+      {hist && <ChartAnalysis series={hist} ticker={ticker} name={name} sector={sec} accent={accent} />}
     </div>
   );
 }

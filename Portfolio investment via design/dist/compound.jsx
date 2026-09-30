@@ -87,6 +87,39 @@ function CompoundingMachine({ accent }) {
     <div className="cm-kpi"><div className="cm-kpi-l">{label}</div><div className="cm-kpi-v mono" style={col ? { color: col } : null}>{v}</div>{sub && <div className="cm-kpi-s">{sub}</div>}</div>
   );
 
+  // NO REAL HISTORY → NO CHART. Never draw an invented curve, channel, signal or backtest.
+  if (!lt || !lt.real) {
+    return (
+      <div className="cm-wrap">
+        <style>{CM_CSS}</style>
+        <section className="pm-card">
+          <div className="pm-card-eyebrow">Compounding Machine · log-trend channel discipline</div>
+          <div className="cm-title">{ticker || "—"}</div>
+          <div style={{ margin: "14px 0 16px", padding: "22px 20px", border: "1px dashed var(--line, #e2e5e9)", borderRadius: 10, textAlign: "center" }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "var(--ink, #14171c)" }}>Missing data</div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>{ticker} has no real price history in the feed{vsKey !== "own" ? " (or the benchmark doesn't)" : ""}, so there's no channel, signal or backtest to show. It appears here once the daily job fetches it.</div>
+          </div>
+          <div className="cm-controls">
+            <label>Asset
+              <input list="cm-tickers" value={ticker} onChange={(e) => { const v = e.target.value.toUpperCase().trim(); setTicker(v); save({ ticker: v }); }} />
+              <datalist id="cm-tickers">{options.map((t) => <option key={t} value={t}></option>)}</datalist>
+            </label>
+            <label>Channel vs
+              <select value={vsKey} onChange={(e) => { const v = e.target.value; setVsKey(v); save({ vsKey: v }); }}>
+                <option value="own">Own trend (absolute)</option>
+                <option value="ndx">Nasdaq-100 (ratio)</option>
+                <option value="spx">S&P 500 (ratio)</option>
+                <option value="tsx">TSX 60 (ratio)</option>
+                <option value="gold">Gold (ratio)</option><option value="silver">Silver (ratio)</option><option value="copper">Copper (ratio)</option><option value="uranium">Uranium (ratio)</option>
+                <option value="btc">Bitcoin (ratio)</option>
+              </select>
+            </label>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="cm-wrap">
       <style>{CM_CSS}</style>
@@ -94,7 +127,7 @@ function CompoundingMachine({ accent }) {
         <div className="cm-head">
           <div>
             <div className="pm-card-eyebrow">Compounding Machine · log-trend channel discipline</div>
-            <div className="cm-title">{ticker} vs {rel ? <b>{lt.vsName} · ratio channel</b> : "its own trend"} <span className="cm-flag mono">{lt.real ? "● live series" : "demo series"} · {yrs}y fit</span></div>
+            <div className="cm-title">{ticker} vs {rel ? <b>{lt.vsName} · ratio channel</b> : "its own trend"} <span className="cm-flag mono">● live series · {yrs}y fit</span></div>
           </div>
           <div className="cm-signal" style={{ borderColor: zoneCol + "55", background: zoneCol + "0d" }}>
             <div className="cm-sig-z mono" style={{ color: zoneCol }}>{lt.z >= 0 ? "+" : ""}{lt.z.toFixed(1)}σ</div>
@@ -134,6 +167,7 @@ function CompoundingMachine({ accent }) {
               <option value="ndx">Nasdaq-100 (ratio)</option>
               <option value="spx">S&P 500 (ratio)</option>
               <option value="tsx">TSX 60 (ratio)</option>
+              <option value="gold">Gold (ratio)</option><option value="silver">Silver (ratio)</option><option value="copper">Copper (ratio)</option><option value="uranium">Uranium (ratio)</option>
               <option value="btc">Bitcoin (ratio)</option>
             </select>
           </label>

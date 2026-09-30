@@ -28,6 +28,10 @@
     ndx: { name: "Nasdaq-100", feedKeys: ["NDX", "^NDX", "QQQ"] },
     spx: { name: "S&P 500", feedKeys: ["SPX", "^GSPC", "SPY"] },
     tsx: { name: "TSX 60", feedKeys: ["TSX60", "XIU.TO", "TSX"] },
+    gold: { name: "Gold", feedKeys: ["GOLD", "GLD", "IAU"] },
+    silver: { name: "Silver", feedKeys: ["SILVER", "SLV"] },
+    copper: { name: "Copper", feedKeys: ["COPPER", "COPX"] },
+    uranium: { name: "Uranium", feedKeys: ["URANIUM", "URA"] },
   };
   function benchSeries(key, n = 252) {
     const b = BENCH[key] || BENCH.spx;
@@ -127,6 +131,7 @@
   function SigmaStrip({ ticker, benchKey, height = 64 }) {
     const r = compute(ticker, benchKey);
     if (!r) return null;
+    if (!r.real) return <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", padding: "8px 0", textAlign: "center", border: "1px dashed var(--line, #e2e5e9)", borderRadius: 7 }}>σ-band: missing data — no real price history for {ticker}</div>;
     const W = 320, H = height, n = r.zPath.length;
     const x = (i) => (i / (n - 1)) * W;
     const y = (z) => H / 2 - (Math.max(-2.6, Math.min(2.6, z)) / 2.6) * (H / 2 - 4);
@@ -148,7 +153,7 @@
 
   // ---- log-trend channel (GMI "Compounding Machine" pattern): regression on log price,
   // σ of residuals → distance-to-own-trend in σ. Absolute twin of the relative σ-band above.
-  // vsKey: null = own trend; "ndx"/"spx"/"tsx" = ratio vs index; "btc" = ratio vs Bitcoin.
+  // vsKey: null = own trend; "ndx"/"spx"/"tsx"/"gold" = ratio vs index/gold; "btc" = ratio vs Bitcoin.
   // Ratio mode fits the channel on log(asset ÷ benchmark) — the Real Vision relative lens;
   // px keeps the aligned ASSET price so $ accounting stays honest.
   function logTrend(ticker, lookback = 1260, vsKey = null) {

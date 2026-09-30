@@ -105,7 +105,7 @@ function runModel(model, universe, sp500) {
 
 // multi-line equity chart
 function TrackChart({ runs, accent, actual, height = 300 }) {
-  const W = 1000, H = height, padT = 14, padB = 26, padL = 44, padR = 12;
+  const W = 1000, H = height, padT = 14, padB = 40, padL = 44, padR = 12;
   const all = runs.flatMap((r) => r.curve).concat(runs[0].bench).concat(actual || []);
   const lo = Math.min(...all), hi = Math.max(...all);
   const n = runs[0].curve.length;
@@ -114,12 +114,26 @@ function TrackChart({ runs, accent, actual, height = 300 }) {
   const line = (arr) => (window.smoothPath ? window.smoothPath(arr.map((v, i) => [x(i), y(v)]), 0.5)
     : arr.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" "));
   const yTicks = [lo, (lo + hi) / 2, hi];
+  // the curves are indexed in TRADING days ending today — convert to calendar dates (×1.4484,
+  // the same factor odds.jsx/compound.jsx use) so the axis reads as real time, not bar counts.
+  const dateAt = (i) => { const d = new Date(); d.setDate(d.getDate() - Math.round((n - 1 - i) * 1.4484)); return d; };
+  const fmt = (d) => d.toLocaleDateString("en-CA", { month: "short", day: "numeric" });
+  const xTicks = [0, 1, 2, 3, 4].map((k) => Math.round((k / 4) * (n - 1)));
+  const baseY = H - padB;
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }}>
       {yTicks.map((v, i) => (
         <g key={i}>
           <line x1={padL} y1={y(v)} x2={W - padR} y2={y(v)} stroke="currentColor" strokeOpacity="0.08" />
           <text x={padL - 8} y={y(v) + 4} textAnchor="end" className="tk-ytick">{((v - 1) * 100 >= 0 ? "+" : "") + ((v - 1) * 100).toFixed(0)}%</text>
+        </g>
+      ))}
+      <line x1={padL} y1={baseY} x2={W - padR} y2={baseY} stroke="currentColor" strokeOpacity="0.15" />
+      {xTicks.map((i, k) => (
+        <g key={"x" + k}>
+          <line x1={x(i)} y1={padT} x2={x(i)} y2={baseY} stroke="currentColor" strokeOpacity="0.05" />
+          <line x1={x(i)} y1={baseY} x2={x(i)} y2={baseY + 4} stroke="currentColor" strokeOpacity="0.2" />
+          <text x={x(i)} y={baseY + 16} textAnchor={k === 0 ? "start" : k === xTicks.length - 1 ? "end" : "middle"} className="tk-xtick">{fmt(dateAt(i))}</text>
         </g>
       ))}
       <path d={line(runs[0].bench)} fill="none" stroke="currentColor" strokeOpacity="0.3" strokeWidth="1.6" strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />

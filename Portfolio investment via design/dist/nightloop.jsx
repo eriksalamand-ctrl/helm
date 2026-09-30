@@ -14,7 +14,7 @@
   const KEY = "helm_nightloop_v1";
   const { useState: useNlState, useEffect: useNlEffect } = React;
 
-  const load = () => { try { return JSON.parse(localStorage.getItem(KEY) || "null") || { runs: [], pending: null, rejected: {}, autoApply: false }; } catch (e) { return { runs: [], pending: null, rejected: {}, autoApply: false }; } };
+  const load = () => { try { const j = JSON.parse(localStorage.getItem(KEY) || "null") || { runs: [], pending: null, rejected: {}, autoApply: false }; if (!j.policy) j.policy = j.autoApply ? "auto" : "manual"; return j; } catch (e) { return { runs: [], pending: null, rejected: {}, autoApply: false }; } };
   const save = (j) => { try { localStorage.setItem(KEY, JSON.stringify(j)); } catch (e) {} };
   const today = () => new Date().toISOString().slice(0, 10);
   const notify = () => { try { window.dispatchEvent(new Event("helm:nightloop")); } catch (e) {} };
@@ -87,6 +87,26 @@
     return { checks, accepted: checks.every((c) => c.pass) };
   }
 
+  // ---- 5b: CONFIDENCE — how much should the loop trust this edit? ----
+  // Gates answer "is it better?"; confidence answers "is the evidence thick enough to act unattended?".
+  // Four honest inputs, none of them opinion: how many predictions the diagnosis rests on, how much
+  // of the replay ran on REAL prices, how far past the gate bar it cleared, and — the one that catches
+  // lucky single-name flukes — how BROADLY it improved across the replayed names.
+  function confidence(bucket, base, cand, baseRuns, candRuns, realN) {
+    const tot = (r) => r.daily.reduce((a, x) => a * (1 + x), 1);
+    let better = 0;
+    for (let i = 0; i < baseRuns.length; i++) if (tot(candRuns[i]) > tot(baseRuns[i]) * 1.001) better++;
+    const breadth = baseRuns.length ? better / baseRuns.length : 0;
+    const parts = [
+      { k: "Evidence", v: Math.min(25, (bucket.n / 30) * 25), max: 25, note: `${bucket.n} predictions resolved in the bucket` },
+      { k: "Real data", v: (realN / Math.max(1, baseRuns.length)) * 20, max: 20, note: `${realN}/${baseRuns.length} replays on real price history` },
+      { k: "Gate margin", v: Math.max(0, Math.min(25, ((cand.sharpe - base.sharpe - 0.05) / 0.15) * 25)), max: 25, note: `Sharpe +${(cand.sharpe - base.sharpe).toFixed(2)} vs +0.05 bar` },
+      { k: "Breadth", v: breadth * 30, max: 30, note: `${better}/${baseRuns.length} names improved (not one lucky name)` },
+    ];
+    const score = Math.round(parts.reduce((s, p) => s + p.v, 0));
+    return { score, tier: score >= 72 ? "high" : score >= 50 ? "medium" : "low", parts, breadth };
+  }
+
   // ---- the nightly run ----
   let running = false;
   async function run(force) {
@@ -138,21 +158,25 @@
 
       // 5 GATE
       const g = gates(base, cand);
+      const conf = confidence(bucket, base, cand, baseRuns, candRuns, realN);
       const runEntry = {
         verdict: g.accepted ? "staged" : "rejected-by-gates",
         bucket: { k: bucket.key, ev: bucket.evError, n: bucket.n },
         ruleId, ruleName: meta.name, ruleDesc: meta.desc,
         rationale: `${bucket.key}: engine ${bucket.evError > 0 ? "overshoots" : "undershoots"} realized EV by ${(Math.abs(bucket.evError) * 100).toFixed(0)}% (n=${bucket.n}) → tested "${meta.name}"`,
-        base, cand, checks: g.checks, dataReal: `${realN}/${baseRuns.length} real series`,
+        base, cand, checks: g.checks, conf, dataReal: `${realN}/${baseRuns.length} real series`,
       };
       if (!g.accepted) { log(runEntry); return; }
 
-      // 6 STAGE (or auto-apply if the human explicitly turned that on)
-      if (J.autoApply && window.HelmConfig) {
-        window.HelmConfig.apply({ rules: [...active, ruleId], meta: { source: "night-loop (auto)", label: meta.name, note: runEntry.rationale } });
+      // 6 STAGE — the policy decides who signs off. manual: always you. assisted: the loop signs
+      // only HIGH-confidence edits itself. auto: anything that clears the gates.
+      const pol = J.policy || "manual";
+      const selfSign = window.HelmConfig && (pol === "auto" || (pol === "assisted" && conf.tier === "high"));
+      if (selfSign) {
+        window.HelmConfig.apply({ rules: [...active, ruleId], meta: { source: `night-loop (${pol === "auto" ? "auto" : "assisted · high confidence"})`, label: meta.name, note: runEntry.rationale } });
         log({ ...runEntry, verdict: "auto-applied" });
       } else {
-        J.pending = { ...runEntry, d: today() };
+        J.pending = { ...runEntry, d: today(), heldFor: pol === "assisted" ? `confidence ${conf.score}/100 (${conf.tier}) — below the auto bar, needs your call` : null };
         log(runEntry);
       }
     } finally { running = false; }
@@ -173,7 +197,8 @@
     J.runs.unshift({ d: today(), verdict: "rejected", ruleId: J.pending.ruleId, ruleName: J.pending.ruleName, reason: "rejected by user — blacklisted 14d" });
     J.pending = null; save(J); notify();
   }
-  function setAutoApply(v) { const J = load(); J.autoApply = !!v; save(J); notify(); }
+  function setAutoApply(v) { const J = load(); J.autoApply = !!v; J.policy = v ? "auto" : "manual"; save(J); notify(); }
+  function setPolicy(p) { const J = load(); J.policy = p; J.autoApply = p === "auto"; save(J); notify(); }
 
   // ---- Bridge rail card ----
   function NightLoopCard() {
@@ -195,9 +220,11 @@
       <section className="pm-card nl-card">
         <div className="nl-head">
           <span className="nl-eyebrow">Night loop · self-learning{P ? " — 1 pending" : ""}</span>
-          <label className="nl-auto" title="When on, gate-passing edits apply without waiting (still config-level, reversible, journaled)">
-            <input type="checkbox" checked={!!J.autoApply} onChange={(e) => setAutoApply(e.target.checked)} /> auto-apply
-          </label>
+          <div className="nl-pol" title="Who signs off a gate-passing edit. Every mode is config-level and reversible.">
+            {[["manual", "You sign every edit"], ["assisted", "Loop signs only high-confidence edits (≥72/100); the rest wait for you"], ["auto", "Loop signs anything that clears the gates"]].map(([k, t]) => (
+              <button key={k} className={"nl-pol-b" + ((J.policy || "manual") === k ? " on" : "")} title={t} onClick={() => setPolicy(k)}>{k}</button>
+            ))}
+          </div>
         </div>
         {P ? (
           <div className="nl-pending">
@@ -209,6 +236,16 @@
               <Kpi l="Max DD" b={P.base.mdd} c={P.cand.mdd} dp={1} pct />
             </div>
             <div className="nl-p-meta mono">replay: top-8 held, 2y purged walk-forward · {P.dataReal} · gates {P.checks.filter((c) => c.pass).length}/{P.checks.length}</div>
+            {P.conf && (
+              <div className={"nl-conf " + P.conf.tier}>
+                <div className="nl-conf-h"><b>Confidence {P.conf.score}/100</b><span className="nl-conf-t">{P.conf.tier}</span></div>
+                <div className="nl-conf-bar"><i style={{ width: P.conf.score + "%" }}></i></div>
+                <div className="nl-conf-parts">{P.conf.parts.map((p) => (
+                  <span key={p.k} title={p.note}>{p.k} <b className="mono">{Math.round(p.v)}/{p.max}</b></span>
+                ))}</div>
+                {P.heldFor && <div className="nl-conf-why">{P.heldFor}</div>}
+              </div>
+            )}
             <div className="nl-actions">
               <button className="nl-ok" onClick={approve}>Approve & apply</button>
               <button className="nl-no" onClick={reject}>Reject (14d)</button>
@@ -260,6 +297,23 @@
   .nl-ok { font: inherit; font-size: 12px; font-weight: 700; color: #fff; background: #0e9f6e; border: 0; border-radius: 8px; padding: 6px 13px; cursor: pointer; }
   .nl-no { font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-2); background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 13px; cursor: pointer; }
   .nl-last { display: flex; align-items: baseline; gap: 8px; }
+  .nl-pol { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; flex: none; }
+  .nl-pol-b { font-family: var(--mono); font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); background: none; border: 0; border-right: 1px solid var(--line); padding: 3px 7px; cursor: pointer; }
+  .nl-pol-b:last-child { border-right: 0; }
+  .nl-pol-b.on { background: var(--ink, #14171c); color: #fff; }
+  .nl-conf { margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--panel-2, #f4f6f8); border-left: 2px solid var(--muted); }
+  .nl-conf.high { border-left-color: #0e9f6e; }
+  .nl-conf.medium { border-left-color: #b45309; }
+  .nl-conf.low { border-left-color: #e02424; }
+  .nl-conf-h { display: flex; justify-content: space-between; align-items: baseline; font-size: 11.5px; }
+  .nl-conf-t { font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .nl-conf-bar { height: 3px; border-radius: 99px; background: var(--line); margin: 5px 0 6px; overflow: hidden; }
+  .nl-conf-bar i { display: block; height: 100%; background: currentColor; }
+  .nl-conf.high .nl-conf-bar i { background: #0e9f6e; }
+  .nl-conf.medium .nl-conf-bar i { background: #b45309; }
+  .nl-conf.low .nl-conf-bar i { background: #e02424; }
+  .nl-conf-parts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 10px; color: var(--muted); }
+  .nl-conf-why { font-size: 10.5px; color: var(--ink-2, #454c57); margin-top: 6px; line-height: 1.45; }
   .nl-badge { font-family: var(--mono); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 99px; white-space: nowrap; flex: none; }
   .nl-badge.no-edit, .nl-badge.skipped { background: var(--panel-2, #f4f6f8); color: var(--muted); }
   .nl-badge.staged { background: #0e9f6e1f; color: #0e9f6e; }
@@ -279,7 +333,7 @@
     const el = document.createElement("style"); el.id = "helm-nl-css"; el.textContent = NL_CSS; document.head.appendChild(el);
   }
 
-  window.HelmNightLoop = { run, approve, reject, setAutoApply, journal: load };
+  window.HelmNightLoop = { run, approve, reject, setAutoApply, setPolicy, journal: load };
   window.NightLoopCard = NightLoopCard;
 
   // schedule: give feed + modules ~10s to settle, then run (skips itself if already ran today)

@@ -74,6 +74,17 @@
     return best;
   }
 
+  // learned calibration on the FINAL hop — txlearn grades past alerts against realized excess
+  // moves and scales the curated weight (capped, never a full override). See txlearn.js.
+  function withLearning(srcId, best) {
+    const L = window.HelmTxLearn; if (!L) return best;
+    Object.entries(best).forEach(([t, r]) => {
+      const e = L.effWeight(srcId, t, r.w);
+      if (e.learned) { r.wCurated = r.w; r.w = e.w; r.learn = { n: e.n, scale: e.scale, hit: e.hit }; }
+    });
+    return best;
+  }
+
   // ---- the public read: alerts that end at YOUR dollars ----
   let _cache = null, _stamp = 0;
   function alerts() {
@@ -91,10 +102,10 @@
       if (it.label === "calm") { calm.push(it.name); return; }
       const cp = (window.HelmGraph.chokepoints || {})[id] || {};
       const vol = cp.mode === "volatility";
-      const reach = propagate(id);
+      const reach = withLearning(id, propagate(id));
       const touches = Object.entries(reach)
         .filter(([t]) => held[t])
-        .map(([t, r]) => ({ ticker: t, w: r.w, path: r.path, rels: r.rels, $: held[t] }))
+        .map(([t, r]) => ({ ticker: t, w: r.w, path: r.path, rels: r.rels, learn: r.learn, wCurated: r.wCurated, $: held[t] }))
         .sort((a, b) => Math.abs(b.w * b.$) - Math.abs(a.w * a.$));
       if (!touches.length) { calm.push(it.name); return; }
       const hurt = touches.filter((x) => x.w < 0).reduce((s, x) => s + x.$, 0);
@@ -119,7 +130,7 @@
       const day = new Date().toISOString().slice(0, 10);
       list.forEach((a) => {
         if (!led.some((e) => e.d === day && e.id === a.id)) {
-          led.push({ d: day, id: a.id, label: a.it.label, tickers: a.touches.map((t) => ({ t: t.ticker, px: (view.holdings.find((h) => h.ticker === t.ticker) || {}).price })) });
+          led.push({ d: day, id: a.id, label: a.it.label, tickers: a.touches.map((t) => ({ t: t.ticker, w: t.wCurated != null ? t.wCurated : t.w, px: (view.holdings.find((h) => h.ticker === t.ticker) || {}).price })) });
         }
       });
       localStorage.setItem(lkey, JSON.stringify(led.slice(-200)));
@@ -216,6 +227,7 @@
                   </React.Fragment>
                 ))}
                 <span className="tx-w mono">{a.vol ? "sensitive" : t.w > 0 ? "benefits" : "exposed"} · {money(t.$)}</span>
+                {t.learn && <span className="tx-learn mono" title={`Curated ${t.wCurated.toFixed(2)} → measured ${t.w.toFixed(2)} from ${t.learn.n} past alert${t.learn.n > 1 ? "s" : ""} on this pair. Realized excess vs market ran ${t.learn.scale.toFixed(1)}× the curated call; sign agreed ${Math.round(t.learn.hit * 100)}% of the time.`}>calibrated · n{t.learn.n}</span>}
               </div>
             ))}
             {a.touches[0] && a.touches[0].rels && <div className="tx-why">why: {a.touches[0].rels.join(" → ")}</div>}
@@ -232,7 +244,20 @@
           </div>
         ))}
         {mapFor && window.TxFlowMap && React.createElement(window.TxFlowMap, { alertId: mapFor, onClose: () => setMapFor(null), onPick })}
+        <TxCalibration />
       </section>
+    );
+  }
+
+  // how well have the curated elasticities actually held up? (txlearn.js grades them)
+  function TxCalibration() {
+    const s = React.useMemo(() => { try { return window.HelmTxLearn ? window.HelmTxLearn.summary() : null; } catch (e) { return null; } }, []);
+    if (!s) return null;
+    if (!s.pairs) return <div className="tx-cal">Graph calibration: <b>gathering</b> — alerts are graded against realized excess-vs-market moves once their horizon passes (days/weeks/months by chokepoint). Weights stay as curated until then.</div>;
+    return (
+      <div className="tx-cal">
+        Graph calibration: <b>{s.pairs} chokepoint→name pair{s.pairs > 1 ? "s" : ""}</b> graded on {s.n} resolved alert{s.n > 1 ? "s" : ""} · direction right <b>{Math.round(s.hit * 100)}%</b> of the time · realized moves ran <b>{s.scale.toFixed(1)}×</b> the curated call. Measured pairs shift their weight up to half-way toward the evidence; the rest stay curated.
+      </div>
     );
   }
 
@@ -265,6 +290,9 @@
   .tx-tkr { font: inherit; font-weight: 700; color: var(--ink); background: none; border: 1px solid var(--line, #e8ebef); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
   .tx-tkr:hover { border-color: var(--muted); }
   .tx-w { margin-left: auto; font-size: 10.5px; color: var(--ink-2); white-space: nowrap; }
+  .tx-learn { font-size: 9px; color: #0e9f6e; background: #0e9f6e14; border-radius: 4px; padding: 1px 5px; white-space: nowrap; cursor: help; flex: none; }
+  .tx-cal { font-size: 10px; color: var(--muted); line-height: 1.5; margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--line); }
+  .tx-cal b { color: var(--ink-2, #454c57); font-weight: 600; }
   .tx-stance { font-size: 11.5px; color: var(--ink-2); line-height: 1.5; }
   .tx-stance b { font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: #2563eb; margin-right: 6px; }
   .tx-actions { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }

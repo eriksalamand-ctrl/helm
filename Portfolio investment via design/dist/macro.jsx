@@ -57,10 +57,18 @@ const chg = (a) => a.length > 1 ? a[a.length - 1] - a[0] : 0;
 // ---- Global M2 liquidity (Raoul Pal lens): BTC tracks global M2 with a ~10–12 week lag ----
 function globalM2Series() {
   const live = window.HelmFeed && window.HelmFeed.macro && window.HelmFeed.macro.global_m2;
-  if (live && live.length) return live.map((o) => o.v);
+  if (live && live.length && m2Freshness().live) return live.map((o) => o.v);
   return walk(303, 78, 102, 0.16, 0.010, 80).map((v) => v * 1000); // ~$102T in trillions
 }
-const m2IsLive = () => !!(window.HelmFeed && window.HelmFeed.macro && window.HelmFeed.macro.global_m2 && window.HelmFeed.macro.global_m2.length);
+const m2Freshness = () => {
+  const M = window.HelmFeed && window.HelmFeed.macro;
+  const raw = M && M.global_m2;
+  if (!raw || !raw.length) return { live: false, stale: false };
+  const d = raw[raw.length - 1].d || M.global_m2_asof;
+  const days = d ? (Date.now() - new Date(d + "T00:00:00Z").getTime()) / 86400000 : 9999;
+  return { live: days <= 210, stale: days > 210, asof: d, days: Math.round(days), coverage: M.global_m2_coverage, sources: M.global_m2_sources };
+};
+const m2IsLive = () => m2Freshness().live;
 // real BTC monthly closes aligned onto the (monthly) live M2 months, shifted LEFT by
 // lagObs so leader/follower peaks overlay; the flat tail = the lag window (forecast zone)
 function realBtcMonthly(lagObs) {
@@ -200,6 +208,7 @@ function MacroModule({ accent }) {
   const news = getNews();
   const m2 = globalM2Series();
   const m2Live = m2IsLive();
+  const m2f = m2Freshness();
   const lagObs = m2Live ? Math.max(1, Math.round(lag / 4.33)) : lag; // live series is monthly
   const btc = (m2Live && realBtcMonthly(lagObs)) || btcVsM2(m2, lagObs);
   const m2Chg = (last(m2) / m2[0] - 1) * 100;
@@ -271,7 +280,8 @@ function MacroModule({ accent }) {
         <div className="pm-card-head">
           <div>
             <div className="pm-card-eyebrow">Global M2 liquidity · the liquidity-cycle lens</div>
-            <div className="mc-liq-sub">Global M2 (US + Eurozone + Japan + UK + Canada money supply, in USD{m2Live ? " · real FRED/OECD series, monthly" : ""}) leads Bitcoin by ~10–12 weeks — the dominant driver of the crypto/risk cycle.{m2Live ? " China M2 has no maintained free series — excluded, impulse still representative." : ""}</div>
+            <div className="mc-liq-sub">Global M2 (major-bloc money supply converted to USD{m2Live ? ` · real FRED series, monthly${m2f.coverage ? " · " + m2f.coverage : ""}` : ""}) leads Bitcoin by ~10–12 weeks — the dominant driver of the crypto/risk cycle.</div>
+            {m2f.stale && <div className="mc-m2-stale">⚠ Feed series stale — last real observation {m2f.asof} ({m2f.days} days ago). FRED's international M2 series go dead without notice; the chart below is the modelled baseline, not live data. The ingest job now probes replacement series per bloc and reports coverage.</div>}
           </div>
           <div className="mc-m2-ctrl">
             <span className="mc-m2-lagval" style={{ color: accent }}>${(last(m2) / 1000).toFixed(1)}T <span>{m2Chg >= 0 ? "+" : ""}{m2Chg.toFixed(1)}%</span></span>

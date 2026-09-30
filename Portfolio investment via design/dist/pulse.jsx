@@ -32,11 +32,21 @@
     }
 
     // 2 · Global M2 impulse (Pal lens; live series is MONTHLY — 6 obs ≈ 6mo)
+    // A monthly series that stopped updating is NOT real data — FRED's international M2
+    // series go dead without warning, and a 3-year-old impulse scored as live is worse
+    // than an honest demo value. Anything older than ~7 months is treated as stale.
     {
-      const m2 = liveSeries("global_m2");
+      const M = window.HelmFeed && window.HelmFeed.macro;
+      const raw = M && M.global_m2;
+      const stale = (() => {
+        if (!raw || !raw.length) return true;
+        const d = raw[raw.length - 1].d || M.global_m2_asof;
+        return !d || (Date.now() - new Date(d + "T00:00:00Z").getTime()) / 86400000 > 210;
+      })();
+      const m2 = stale ? null : liveSeries("global_m2");
       const chg = m2 ? (last(m2) / m2[Math.max(0, m2.length - 7)] - 1) * 100 : 2.1;
       out.push({ k: "Global M2 impulse", real: !!m2, score: scoreTrend(chg, 5),
-        read: `${chg >= 0 ? "+" : ""}${chg.toFixed(1)}% 6mo — ${chg >= 1 ? "expanding" : chg <= -1 ? "contracting" : "flat"}` });
+        read: `${chg >= 0 ? "+" : ""}${chg.toFixed(1)}% 6mo — ${chg >= 1 ? "expanding" : chg <= -1 ? "contracting" : "flat"}${m2 && M.global_m2_coverage ? ` · ${M.global_m2_coverage}` : stale && raw && raw.length ? ` · feed series stale (${raw[raw.length - 1].d}) — using baseline` : ""}` });
     }
 
     // 3 · HY credit spreads (OAS %, level + 4wk change)
