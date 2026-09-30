@@ -76,7 +76,16 @@ CRYPTO = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL", "ripple": "XRP",
           "litecoin": "LTC", "near": "NEAR", "cosmos": "ATOM", "aptos": "APT",
           # held in the Crypto Direct account (Sep 2026)
           "chainlink": "LINK", "sui": "SUI", "ondo-finance": "ONDO", "tron": "TRX",
-          "bittensor": "TAO", "render-token": "RENDER", "dogecoin": "DOGE"}
+          "bittensor": "TAO", "render-token": "RENDER", "dogecoin": "DOGE",
+          # watchlist (Sep 2026) — tracked, not held
+          "aave": "AAVE", "ethena": "ENA", "aerodrome-finance": "AERO",
+          "zcash": "ZEC", "uniswap": "UNI", "hyperliquid": "HYPE", "derive": "DRV",
+          # SPX6900 is stored as "SPX6900", never "SPX" — "SPX" is the S&P 500 benchmark key
+          "spx6900": "SPX6900"}
+
+# Watchlist coins whose CoinGecko id we don't pin by hand (ambiguous symbols) — resolved
+# by resolve_crypto_ids() via /search, highest market-cap rank wins; the chosen id is logged.
+WATCH_CRYPTO = ["BILLY"]
 
 
 # AUTO-ADD: any positions.csv row with exchange=CRYPTO whose symbol isn't mapped above is
@@ -99,7 +108,8 @@ def resolve_crypto_ids(symbols):
             print(f"  crypto auto-add: {sym} not found on CoinGecko — skipped")
 
 # index benchmarks (Stooq symbols)
-BENCHMARKS = {"^spx": "SPX", "^ndq": "NDX", "^tsx": "TSX"}
+BENCHMARKS = {"^spx": "SPX", "^ndq": "NDX", "^tsx": "TSX", "xauusd": "GOLD",  # GOLD = spot gold, USD/oz
+              "xagusd": "SILVER", "hg.f": "COPPER", "ux.f": "URANIUM"}  # USD/oz · USD/lb · USD/lb U3O8
 
 HIST_DAYS = 1280  # ~5y of trading days for the backtest
 
@@ -148,7 +158,8 @@ _DUPE_FUNDAMENTALS = {("SHOP", "TSX")}
 
 UNIVERSE_ETFS = [
     ("SMH","US"),("SOXX","US"),("ARKK","US"),("ARKW","US"),("ARKG","US"),("IBIT","US"),
-    ("SPY","US"),("IVV","US"),("VTI","US"),("QQQ","US"),("VEA","US"),("VTV","US"),("BND","US"),("GLD","US"),
+    ("SPY","US"),("IVV","US"),("VTI","US"),("QQQ","US"),("VEA","US"),("VTV","US"),("BND","US"),("GLD","US"),("IAU","US"),("CGL.C","TSX"),("MNT","TSX"),
+    ("SLV","US"),("COPX","US"),("URA","US"),("URNM","US"),("CCJ","US"),("U.UN","TSX"),
     ("IWF","US"),("VGT","US"),("VIG","US"),("IJH","US"),("XLK","US"),("IJR","US"),("RSP","US"),("IWM","US"),
     ("IWD","US"),("TLT","US"),("XLF","US"),("IAU","US"),("VT","US"),("JEPI","US"),("XLV","US"),("SCHD","US"),
     ("IEF","US"),("LQD","US"),("DIA","US"),("VB","US"),
@@ -726,14 +737,21 @@ def main():
         time.sleep(0.4)
 
     for sym, name in BENCHMARKS.items():
-        yh = {"SPX": "^GSPC", "NDX": "^NDX", "TSX": "^GSPTSE"}.get(name)
+        # front-month COMEX futures track spot. Uranium has no free spot series: UX=F (CME U3O8)
+        # is thin on Yahoo, so if it's short we fall back to URA (Global X Uranium ETF) as a
+        # proxy — and the ticker keeps its name, so the proxy is flagged in the log.
+        yh = {"SPX": "^GSPC", "NDX": "^NDX", "TSX": "^GSPTSE", "GOLD": "GC=F",
+              "SILVER": "SI=F", "COPPER": "HG=F", "URANIUM": "UX=F"}.get(name)
         h = (yahoo_history(yh) if yh else None) or stooq_history(sym)
+        if name == "URANIUM" and (not h or len(h) < 250):
+            h = yahoo_history("URA")
+            print(f"  URANIUM: UX=F thin/empty — using URA ETF as proxy ({len(h or [])}d)")
         if h:
             prices[name] = h
         time.sleep(0.4)
 
     # ---- crypto ----
-    resolve_crypto_ids([p["ticker"] for p in positions if p["exchange"] == "CRYPTO"])
+    resolve_crypto_ids([p["ticker"] for p in positions if p["exchange"] == "CRYPTO"] + WATCH_CRYPTO)
     c_quotes, c_prices = coingecko()
     quotes.update(c_quotes)
     # CoinGecko's keyless tier caps history at 365 days. Yahoo carries the big coins as
@@ -741,7 +759,9 @@ def main():
     # the date (fresher, and it's what the live quote comes from). Crypto trades 7 days a
     # week, so 5y = ~1826 points, not the 1260 trading days used for stocks.
     YF_CRYPTO = {"SUI": "SUI20947-USD", "TAO": "TAO22974-USD", "APT": "APT21794-USD",
-                 "NEAR": "NEAR-USD", "RENDER": "RENDER-USD"}
+                 "NEAR": "NEAR-USD", "RENDER": "RENDER-USD", "UNI": "UNI7083-USD",
+                 "AERO": "AERO29270-USD", "ENA": "ENA-USD", "HYPE": "HYPE32196-USD",
+                 "SPX6900": "SPX28081-USD"}
     for sym in sorted(set(CRYPTO.values())):
         cg = c_prices.get(sym) or []
         yh = yahoo_history(YF_CRYPTO.get(sym, f"{sym}-USD"), keep=1830)
